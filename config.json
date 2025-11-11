@@ -1,0 +1,44 @@
+{
+    "system_name": "tps",
+    "topology_path": "../top.pdb",
+
+    "UNITS":{
+      "size_unit": "nanometers",
+      "time_unit": "picoseconds",
+      "temp_unit": "kelvin"
+    },
+    "CV":{
+      "co_breaking": {
+        "type": "bond",
+        "params": {
+          "group_A_atoms": 419,
+          "group_B_atoms": 420
+        },
+        "bound": [0.0,0.135], 
+        "unbound": [0.26,0.6]
+      },
+      "protonation": {
+        "type": "CN",
+        "params": {
+          "group_A_atoms": [419,420,421],
+          "group_B_atoms": "name H"
+        },
+        "bound": [0.0,0.2],
+        "unbound": [0.8,4]
+      }
+    },
+  
+    "Integrator_settings":{
+      "temperature": 400,
+      "constant_variable": "T",
+      "dt": 0.001,
+      "friction": 1.0
+    },
+
+    "mace_model_path": "../mace01.model",
+    "platform_name": "CPU",
+    "TPS_settings": {
+        "n_frames_max": 2000,
+        "n_steps_per_frame": 1
+    }
+  }
