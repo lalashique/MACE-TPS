@@ -1,3 +1,5 @@
+
+# Plan
 1. DFT - mlp_path/dft
    1. Class for setting up DFT calculators
    2. Class for running DFT calculation
