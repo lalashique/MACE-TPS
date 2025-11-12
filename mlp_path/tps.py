@@ -12,11 +12,19 @@ from copy import deepcopy
 import argparse
 from pathlib import Path
 
+import openpathsampling as paths
+import openpathsampling.engines.openmm as ops_openmm
+from openpathsampling.experimental.storage import monkey_patch_all
+from openpathsampling.experimental.storage import Storage
+
+# Monkey patch OpenPathSampling to use experimental features
+paths = monkey_patch_all(paths)
+
+
 from openmm import app
 import openmm as mm
 from openmmtools.integrators import VVVRIntegrator
 from simtk import unit
-import openpathsampling as paths
 import openpathsampling.engines.openmm as eng
 from collections import namedtuple
 
@@ -31,9 +39,6 @@ import MDAnalysis as mda
 from util.parser import read_config, print_config
 from multiprocessing import Process
 
-import openpathsampling.engines.openmm as ops_openmm
-from openpathsampling.experimental.storage import monkey_patch_all
-from openpathsampling.experimental.storage import Storage
 
 import mdtraj
 
@@ -41,6 +46,8 @@ from util.parser import read_config, print_config, create_parser, global_argumen
 from util import CV
 
 from abc import ABC, abstractmethod
+
+
 
 # --- Interfaces / abstract base classes ---
 class ISetup(ABC):
@@ -132,7 +139,7 @@ class ISetup(ABC):
         print("Extracting the topology and creating the system...")
         print(self.resource_directory)
         print(os.path.dirname(os.path.abspath(os.getcwd())))
-        atoms = read('../top.pdb')
+        atoms = read('top.pdb')
 
         pos = atoms.get_positions() / 10
         box_vectors = atoms.get_cell() / 10
@@ -211,7 +218,7 @@ class Sampler(ISampler):
         step=20,
         trajectory_path="p1.xyz",
         output_path=None,
-        ops_storage_path=None,
+        ops_storage_path="tps_storage.db",
         save_final_traj=False,
         final_traj_storage_path=None,
         system_resource_directory="",
@@ -224,6 +231,8 @@ class Sampler(ISampler):
         self.step = step
         self.traj_path = Path(trajectory_path)
         self.output_path = Path(output_path) if output_path else self.directory
+        if os.path.exists(self.output_path) is False:
+            os.makedirs(self.output_path)
         self.ops_storage_path = ops_storage_path
         self.save_final_traj = save_final_traj
         self.final_traj_storage_path = final_traj_storage_path
@@ -251,15 +260,20 @@ class Sampler(ISampler):
             old_store.close()
             init_traj = ops_openmm.trajectory_from_mdtraj(mdtraj_traj)
         elif traj_path.suffix == ".xyz":
-            mdt = mdtraj.load("../top.pdb")
+            mdt = mdtraj.load("top.pdb")
+            print("top loaded")
             traj = mdtraj.load(traj_path, top=mdt)
+            print("traj loaded",)
             traj.unitcell_vectors = np.array(list(mdt.unitcell_vectors) * len(traj.xyz))
+            print("unit cell set",list(mdt.unitcell_vectors))
             init_traj = ops_openmm.trajectory_from_mdtraj(traj, velocities=[np.zeros_like(frame) for frame in traj.xyz])
+            print("init traj created",init_traj)
         else:
             raise ValueError("Unsupported trajectory format")
 
         # create storage
         ops_storage_path = self.output_path / (self.ops_storage_path or f"d_tps_storage_{setup.system_name}.db")
+        print(f"set {ops_storage_path}...")
 
         # --- build TPS/TIS sampler ---
         selector = paths.shooting.UniformSelector()
@@ -270,7 +284,9 @@ class Sampler(ISampler):
         )
 
         # generic network setup placeholder (replace later for TIS)
+        print("Defining CV and states...")
         cv = CV(config_path, self.traj_path)
+        print("Creating TPS network...","states:",cv.states)
         network = paths.TPSNetwork.from_states_all_to_all(cv.states)
 
         move_scheme = paths.MoveScheme(network=network)
@@ -283,6 +299,7 @@ class Sampler(ISampler):
         initial_conditions.sanity_check()
 
         # storage
+        print("Creating storage...")
         storage = Storage(ops_storage_path, "w")
         for obj in [setup.template, setup.md_engine, setup.topology, initial_conditions, move_scheme]:
             storage.save(obj)
@@ -315,17 +332,18 @@ class TPS_setup(ISetup):
 
 if __name__ == "__main__":
     # Example usage
-    tps = TPS_setup("../config.json")
+    tps = TPS_setup("config.json")
     sampler = Sampler(
         setup_class=TPS_setup,
         directory=".",
-        config_file="../config.json",
+        config_file="config.json",
         n_steps=100,
-        trajectory_path="../p1.xyz",
-        output_path="../output",
-        ops_storage_path="../tps_storage.db",
+        trajectory_path="p1.xyz",
+        output_path="output",
+        ops_storage_path="tps_storage.db",
         save_final_traj=True,
-        final_traj_storage_path="../output/final_traj",
-        system_resource_directory="../"
+        final_traj_storage_path="output/final_traj",
+        system_resource_directory="."
     )
-    sampler.run()   
+ 
+    sampler.run()

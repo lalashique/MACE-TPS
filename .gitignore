@@ -210,3 +210,11 @@ __marimo__/
 
 # Database files
 *.db
+
+# mac files
+.DS_Store
+*.DS_Store
+.AppleDouble
+.LSOverride
+._*
+*/._*

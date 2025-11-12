@@ -16,7 +16,7 @@ class CV:
         print("Defining states and interfaces...")
         self.config = read_config(config_path)
         cv_config = self.config.get('CV')
-        mdt = mdtraj.load('../top.pdb')
+        mdt = mdtraj.load('top.pdb')
         traj = mdtraj.load(traj_path,top=mdt)
         traj.unitcell_vectors = np.array(list(mdt.unitcell_vectors)*len(traj.xyz))
         init_traj = ops_openmm.trajectory_from_mdtraj(traj,velocities=[np.zeros_like(frame) for frame in traj.xyz])
