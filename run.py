@@ -114,6 +114,7 @@ def run_AIMMD_TPS(input_path: Path = None, config_path=None, n_steps=None, traj_
     # Run the sampler
         sampler.run(step)
         for i in range(len(storage.steps)):
+            #TODO this now overrirdes previous files, need to fix and thuys has an additional overhead of saving all accepted trajs again
             if storage.steps[i].change.accepted:
                 storage.steps[i].active[0].trajectory.to_mdtraj().save(f"traj/accepted_{i}.xyz")
     

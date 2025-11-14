@@ -45,28 +45,43 @@ class CV:
             fig, ax = plt.subplots(1,1)
             ax.plot(cv_b(init_traj))
             ax.set_xlabel("frames")
-            ax.set_ylabel("CV B3")
+            ax.set_ylabel(f"CV {cv}")
             plt.savefig(f"{cv}_initial_trajectory.png", dpi=300)
             plt.close()
 
+        def descriptor_transform(s, cvs):
+            import numpy as np
+            return np.array([cv(s) for cv in cvs])
+        self.descriptor_transform = paths.FunctionCV(name="descriptor_transform", 
+                                                     f=descriptor_transform, 
+                                                     cvs=cvs,    
+                                                     cv_wrap_numpy_array=True,
+                                                     cv_scalarize_numpy_singletons=False
+                                                     ).with_diskcache()
+        
         bound =[]
         unbound =[]
         for i,cv in enumerate(cvs):
-            bound_cv = paths.CVDefinedVolume(cv, lambda_min=cv_config[cv.name]['bound'][0], lambda_max=cv_config[cv.name]['bound'][1]).named(f'bound_{cv.name}')
-            unbound_cv = paths.CVDefinedVolume(cv, lambda_min=cv_config[cv.name]['unbound'][0], lambda_max=cv_config[cv.name]['unbound'][1]).named(f'unbound_{cv.name}')
-            bound.append(bound_cv)
-            unbound.append(unbound_cv)
+            if cv_config[cv.name].get('bound') is not None:
+                print("Defining bound for CV:", cv.name)
+                print(cv_config[cv.name]['bound'])
+                bound_cv = paths.CVDefinedVolume(cv, lambda_min=cv_config[cv.name]['bound'][0], lambda_max=cv_config[cv.name]['bound'][1]).named(f'bound_{cv.name}')
+                bound.append(bound_cv)
 
-        # bound2 = paths.CVDefinedVolume(cv_b2, lambda_min=0.13, lambda_max=1).named('bound2')
-        # unbound2 = paths.CVDefinedVolume(cv_b2, lambda_min=-1, lambda_max=-0.2).named('unbound2')
-        # print(bound2,unbound2)
+            if cv_config[cv.name].get('unbound') is not None:
+                print("Defining unbound for CV:", cv.name)
+                print(cv_config[cv.name]['unbound'])
+                unbound_cv = paths.CVDefinedVolume(cv, lambda_min=cv_config[cv.name]['unbound'][0], lambda_max=cv_config[cv.name]['unbound'][1]).named(f'unbound_{cv.name}')    
+                unbound.append(unbound_cv)
+
+        print(len(bound), len(unbound))
         for i in range(len(bound)-1):
             bound[0]= bound[0] & bound[i+1]
+        for i in range(len(unbound)-1):
             unbound[0]= unbound[0] & unbound[i+1]
-        # bound = bound2
-        # unbound = unbound2
+
         self.states = (bound[0],unbound[0])
-        # return (bound[0],unbound[0])
+
 
     @staticmethod
     def bondfunction(snapshot, group_A_atoms, group_B_atoms,group_C_atoms, group_D_atoms,coeff=-1):
@@ -86,19 +101,38 @@ class CV:
         angle = np.linalg.norm(ab) + coeff * np.linalg.norm(cd)
         return angle
 
-
     @staticmethod
-    def bond(snapshot, group_A_atoms, group_B_atoms,):
+    def bond(snapshot, group_A_atoms, group_B_atoms,type=0):
         import numpy as np
 
         A_com = snapshot.xyz[group_A_atoms, :]
         B_com = snapshot.xyz[group_B_atoms, :]
 
-        ab = A_com - B_com
+        # # make sure A_com and B_com are 2d arrays
+        A_com = np.atleast_2d(A_com)
+        B_com = np.atleast_2d(B_com)
 
-        # Calculate the angle between the two vectors
-        angle = np.linalg.norm(ab)
-        return angle
+        if type==0:
+            A_com = np.mean(A_com, axis=1)
+            B_com = np.mean(B_com, axis=1)
+            ab = A_com - B_com
+            # Calculate the angle between the two vectors
+            angle = np.linalg.norm(ab)
+            return angle
+                
+        elif type==-1:
+            A_com = np.reshape(A_com, ( -1, 3))
+            B_com = np.reshape(B_com, ( -1, 3))
+            dists = distance_array(A_com, B_com)
+            return np.min(dists)
+        elif type==1:
+            A_com = np.reshape(A_com, ( -1, 3))
+            B_com = np.reshape(B_com, ( -1, 3))
+            dists = distance_array(A_com, B_com)
+            return np.max(dists)
+        else:
+            raise ValueError(f"Unknown bond type: {type}")
+        
     @staticmethod
     def CN(snapshot, group_A_atoms, group_B_atoms, d0=1.25, n=12, m=24):
         d0 = d0/10  # in nm
@@ -112,5 +146,4 @@ class CV:
 
         cn = np.sum(s_ij)
         return cn
-
 
