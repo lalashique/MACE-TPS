@@ -27,9 +27,6 @@ from openmm.app.element import Element
 
 import json
 import MDAnalysis as mda
-# from AIMMD_TIS_openmm_run_scripts.transform_functions import cv_hg_distance
-# import CV
-# from CV import cv_b1, cv_b3, cv_b2
 
 
 
@@ -262,7 +259,7 @@ global_arguments = {
     "config_file": (["-cfg", "--config_file"], str, True, "File in python configparser format with simulation settings."),
     "n_steps": (["-nr", "--n_steps"], int, True, "The number of desired TPS/TIS MC cycles."),
     "output_path": (["-out", "--output_path"], Path, False, "Directory for storing TPS output files."),
-    "previous_model": (["-old_aimmd", "--old_aimmd"], str, False, "Name of the old AIMMD model to be used."),
+    "previous_model": (["-previous_model", "--previous_model"], str, False, "Name of the old AIMMD model to be used."),
     "aimmd_store": (["-aimmd_store", "--aimmd_store"], str, False, "Name for output AIMMD storage, default describes which selector and PES is used."),
     "ops_store": (["-ops_store", "--ops_store"], str, False, "Name for output OPS storage, default describes which selector and PES is used."),
     "final_storage": (["-final_storage", "--final_storage"], str, False, "Save final trajectory as separate OPS storage."),
