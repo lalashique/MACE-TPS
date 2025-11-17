@@ -421,6 +421,10 @@ if args.run_pickled:
 
 if __name__ == "__main__":
     # Example usage
+    # load json config
+
+    with open("tps.json", "r") as f:
+        config = json.load(f)
     tps = TPS_setup("tps.json")
     sampler = Sampler(
         setup_class=tps,
@@ -437,130 +441,131 @@ if __name__ == "__main__":
     # Extend the tps paths
     logger.debug("Extending TPS trajectories...")
     import ase.units as units
-    nsteps = sampler.config_file.get("extend_steps", 100)
-    timestep = sampler.config_file.get("Integrator_settings")["dt"]
-    temp = sampler.config_file.get("Integrator_settings")["temperature"]
-    friction = sampler.config_file.get("Integrator_settings")["friction"]
+    nsteps = sampler.config_file.get("extend_steps", None)
+    if nsteps:
+        timestep = sampler.config_file.get("Integrator_settings")["dt"]
+        temp = sampler.config_file.get("Integrator_settings")["temperature"]
+        friction = sampler.config_file.get("Integrator_settings")["friction"]
 
-    logger.debug(f"Using device: {torch.device}")
-    #check if multiple models are provided
+        logger.debug(f"Using device: {torch.device}")
+        #check if multiple models are provided
 
-    from mace.calculators import MACECalculator
-    mace_model_paths = sampler.config_file.get("mace_model_path")
-    if isinstance(mace_model_paths, list):
-        # committee_models = []
-        committee_calcs = [MACECalculator(model_paths=[m], device=sampler.config_file.get("platform_name", "cuda").lower()) for m in mace_model_paths]
+        from mace.calculators import MACECalculator
+        mace_model_paths = sampler.config_file.get("mace_model_path")
+        if isinstance(mace_model_paths, list):
+            # committee_models = []
+            committee_calcs = [MACECalculator(model_paths=[m], device=sampler.config_file.get("platform_name", "cuda").lower()) for m in mace_model_paths]
 
-        logger.debug(f"Using committee of {len(committee_calcs)} models for extension.")
-    else:
-        raise ValueError("mace_model_path should be a list of model paths for committee evaluation.")
+            logger.debug(f"Using committee of {len(committee_calcs)} models for extension.")
+        else:
+            raise ValueError("mace_model_path should be a list of model paths for committee evaluation.")
 
-    folder = Path(sampler.final_traj_storage_path).resolve()
-    traj_list = [f for f in os.listdir(folder)
-                if f.endswith(".xyz") and not f.startswith("._") and f != "accepted_0.xyz"]
-    traj_list = [folder / f for f in traj_list]
-    logger.info(f"Found {len(traj_list)} trajectories in {folder}.")
+        folder = Path(sampler.final_traj_storage_path).resolve()
+        traj_list = [f for f in os.listdir(folder)
+                    if f.endswith(".xyz") and not f.startswith("._") and f != "accepted_0.xyz"]
+        traj_list = [folder / f for f in traj_list]
+        logger.info(f"Found {len(traj_list)} trajectories in {folder}.")
 
-    from mlp import MACE_MLP
-    evaluate_committee = MACE_MLP.evaluate_committee
-    cell = read(Path(sampler.config_file.get("top_file","top.pdb")).resolve()).get_cell() 
-    # make extend folder
-    # os.makedirs(folder/"extend", exist_ok=True)
-    extend_folder =     folder/"extend"
-    os.makedirs(extend_folder, exist_ok=True)
+        from mlp import MACE_MLP
+        evaluate_committee = MACE_MLP.evaluate_committee
+        cell = read(Path(sampler.config_file.get("top_file","top.pdb")).resolve()).get_cell() 
+        # make extend folder
+        # os.makedirs(folder/"extend", exist_ok=True)
+        extend_folder =     folder/"extend"
+        os.makedirs(extend_folder, exist_ok=True)
 
-    from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
-    from ase.md.langevin import Langevin
+        from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
+        from ase.md.langevin import Langevin
 
 
-    for traj_file in traj_list:
+        for traj_file in traj_list:
 
-        logger.info(f"Processing {traj_file}")
-        base_name = traj_file.name.replace(".xyz", "")
+            logger.info(f"Processing {traj_file}")
+            base_name = traj_file.name.replace(".xyz", "")
 
-        # --- read only first and last frames efficiently ---
-        logger.info(f"  Reading trajectory.. {traj_file}")
-        orig_traj = read(f"{traj_file}", index=":")
-        atoms_first = orig_traj[0].copy()
-        atoms_last = orig_traj[-1].copy()
+            # --- read only first and last frames efficiently ---
+            logger.info(f"  Reading trajectory.. {traj_file}")
+            orig_traj = read(f"{traj_file}", index=":")
+            atoms_first = orig_traj[0].copy()
+            atoms_last = orig_traj[-1].copy()
 
-        frames = []
-        for i, atoms in enumerate(orig_traj):
-            atoms = atoms.copy()
-            atoms.cell = cell
-            # atoms.center()
-            atoms.set_pbc((True, True, True))
-            atoms.calc = committee_calcs[0]
-            # if i % 100 == 0:
-            evaluate_committee(atoms,committee_calcs=committee_calcs)
-            frames.append(atoms.copy())
-            logger.info(f"    Frame {i}/{len(orig_traj)} processed")
-
-        out_file = f"{base_name}.xyz"
-        write(extend_folder/out_file, frames)
-        logger.info(f"  Saved full trajectory with committee stats → {out_file}")
-        frames.clear()
-
-        for direction, atoms in zip(["backward", "forward"], [atoms_first, atoms_last]):
-            logger.info(f"  Running {direction} MD")
-
-            atoms.cell = cell
-            # atoms.center()
-            atoms.set_pbc((True, True, True))
-            atoms.calc = committee_calcs[0]
-
-            # initialize random velocities
-            MaxwellBoltzmannDistribution(atoms, temperature_K=temp)
-            if direction == "backward":
-                atoms.set_velocities(-atoms.get_velocities())
-
-            out_file = f"{base_name}_{direction}.xyz"
-            if os.path.exists(extend_folder/out_file):
-                os.remove(extend_folder/out_file)
-
-            frames = []  # buffer
-
-            dyn = Langevin(atoms, timestep, temperature_K=temp, friction=friction)
-            def buffer_frame():
-                logger.info(f"    Step {dyn.nsteps}/{nsteps} ")
-                # c_time = time.time()
-                # logger.info(f"Time per frame {c_time - start:.1f}s")
+            frames = []
+            for i, atoms in enumerate(orig_traj):
+                atoms = atoms.copy()
+                atoms.cell = cell
+                # atoms.center()
+                atoms.set_pbc((True, True, True))
+                atoms.calc = committee_calcs[0]
+                # if i % 100 == 0:
                 evaluate_committee(atoms,committee_calcs=committee_calcs)
                 frames.append(atoms.copy())
-                
-            # def write_frame():
-                # evaluate_committee(atoms)
-                # atoms.write(out_file, append=True, write_results=False)
+                logger.info(f"    Frame {i}/{len(orig_traj)} processed")
 
-            dyn.attach(buffer_frame, interval=1)
-
-            start = time.time()
-            dyn.run(nsteps)
-            logger.info(f"    Runtime {direction}: {time.time() - start:.1f}s")
-            for atoms in frames:
-                # atoms.arrays['forces'] = atoms.get_forces()
-                if 'momenta' in atoms.arrays:
-                    del atoms.arrays['momenta']
-
-            # write once at end
+            out_file = f"{base_name}.xyz"
             write(extend_folder/out_file, frames)
+            logger.info(f"  Saved full trajectory with committee stats → {out_file}")
             frames.clear()
 
-            logger.info(f"    Saved → {out_file}")
-            # --- end of MD ---
+            for direction, atoms in zip(["backward", "forward"], [atoms_first, atoms_last]):
+                logger.info(f"  Running {direction} MD")
+
+                atoms.cell = cell
+                # atoms.center()
+                atoms.set_pbc((True, True, True))
+                atoms.calc = committee_calcs[0]
+
+                # initialize random velocities
+                MaxwellBoltzmannDistribution(atoms, temperature_K=temp)
+                if direction == "backward":
+                    atoms.set_velocities(-atoms.get_velocities())
+
+                out_file = f"{base_name}_{direction}.xyz"
+                if os.path.exists(extend_folder/out_file):
+                    os.remove(extend_folder/out_file)
+
+                frames = []  # buffer
+
+                dyn = Langevin(atoms, timestep, temperature_K=temp, friction=friction)
+                def buffer_frame():
+                    logger.info(f"    Step {dyn.nsteps}/{nsteps} ")
+                    # c_time = time.time()
+                    # logger.info(f"Time per frame {c_time - start:.1f}s")
+                    evaluate_committee(atoms,committee_calcs=committee_calcs)
+                    frames.append(atoms.copy())
+                    
+                # def write_frame():
+                    # evaluate_committee(atoms)
+                    # atoms.write(out_file, append=True, write_results=False)
+
+                dyn.attach(buffer_frame, interval=1)
+
+                start = time.time()
+                dyn.run(nsteps)
+                logger.info(f"    Runtime {direction}: {time.time() - start:.1f}s")
+                for atoms in frames:
+                    # atoms.arrays['forces'] = atoms.get_forces()
+                    if 'momenta' in atoms.arrays:
+                        del atoms.arrays['momenta']
+
+                # write once at end
+                write(extend_folder/out_file, frames)
+                frames.clear()
+
+                logger.info(f"    Saved → {out_file}")
+                # --- end of MD ---
 
 
-        # --- merge trajectories ---
-        logger.info("  Merging extended trajectory...")
-        backward = read(extend_folder/f"{base_name}_backward.xyz", index=":")
-        forward = read(extend_folder/f"{base_name}_forward.xyz", index=":")
-        backward = backward[::-1]  # reverse time order
+            # --- merge trajectories ---
+            logger.info("  Merging extended trajectory...")
+            backward = read(extend_folder/f"{base_name}_backward.xyz", index=":")
+            forward = read(extend_folder/f"{base_name}_forward.xyz", index=":")
+            backward = backward[::-1]  # reverse time order
 
-        orig_traj = read(extend_folder/f"{base_name}.xyz", index=":")
+            orig_traj = read(extend_folder/f"{base_name}.xyz", index=":")
 
-        # orig_traj = read(f"{folder}/{traj}", index=":")
-        extended = backward + orig_traj + forward
-        out_name = f"{base_name}_extended.xyz"
-        write(extend_folder/out_name, extended)
-        logger.info(f"  Saved → {out_name}\n")
-        
+            # orig_traj = read(f"{folder}/{traj}", index=":")
+            extended = backward + orig_traj + forward
+            out_name = f"{base_name}_extended.xyz"
+            write(extend_folder/out_name, extended)
+            logger.info(f"  Saved → {out_name}\n")
+            
