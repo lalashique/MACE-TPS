@@ -149,7 +149,10 @@ if __name__ == "__main__":
                                 logger.debug(f"DFT calculation not complete for {key}.")
                         else:
                             logger.debug(f"Output file {out_file} does not exist yet. Please run the DFT calculation.")
-                            raise FileNotFoundError(f"Output file {out_file} not found.")
+                            # print commands to run cp2k in the folder
+                            logger.info(f"To run DFT calculation, execute the following commands in {struct_folder}:\n cd {struct_folder} && {dft_engine.settings['command']} -i {dft_engine.input_files[0]} -o cp2k.out") 
+                            # raise FileNotFoundError(f"Output file {out_file} not found.")
+                            exit(0)
             
                 dft_engine._parse_outputs()
                 logger.debug("[DFT] DFT output parsing complete.")
@@ -310,7 +313,7 @@ if __name__ == "__main__":
                 # check if smd.xyz exists in init_dir
                 if not (Path(init_dir) / "smd.xyz").exists():
                     logger.error(f"[SMD] smd.xyz not found in {init_dir}. Cannot proceed with SMD setup.")
-                    raise FileNotFoundError(f"smd.xyz not found in {init_dir}. Cannot proceed with SMD setup.")l
+                    raise FileNotFoundError(f"smd.xyz not found in {init_dir}. Cannot proceed with SMD setup.")
                 source = Path(init_dir) / "smd.xyz"
                 dest = Path('coord.xyz')
                 dest.write_bytes(source.read_bytes())
