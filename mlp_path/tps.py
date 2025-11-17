@@ -422,9 +422,11 @@ if args.run_pickled:
 if __name__ == "__main__":
     # Example usage
     # load json config
+    
 
     with open("tps.json", "r") as f:
         config = json.load(f)
+    
     tps = TPS_setup("tps.json")
     sampler = Sampler(
         setup_class=tps,
