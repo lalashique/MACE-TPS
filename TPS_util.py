@@ -173,9 +173,6 @@ class TPS_setup:
         test_system = testsystem(name='CB7:B2', system=self.system, topology=self._topology, positions=self.positions)
         return eng.snapshot_from_testsystem(test_system)
 
-        return (bound, unbound)
-
-
 
 def create_parser(arguments_list):
     """

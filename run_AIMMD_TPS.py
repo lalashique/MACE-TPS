@@ -62,8 +62,6 @@ def run_AIMMD_TPS(input_path: Path = None, config_path=None, n_steps=None, traj_
             raise ValueError("Unsupported file type. Use .nc or .db for trajectory storage.")
     else:
         raise ValueError("traj_path is required to load initial trajectory.")
-    # print(init_traj.to_dict())
-    # print(init_traj.objects())
 
     # Create storage paths
     if ops_storage_path is None:
@@ -139,6 +137,7 @@ def run_AIMMD_TPS(input_path: Path = None, config_path=None, n_steps=None, traj_
     sampler.attach_hook(storehook)
     sampler.attach_hook(densityhook)
    
+   # TODO: this needs to be modified and incoroporated into the new classes 
     step = 20 
     # mkdir output directory for accepted trajectories
     if not os.path.exists("traj"):
