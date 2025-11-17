@@ -1,3 +1,12 @@
+
+# TPS and mace-tps specific ignores
+*.db
+*.json
+*.sh
+*.png 
+*.xyz
+
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

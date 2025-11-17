@@ -82,25 +82,6 @@ class CV:
 
         self.states = (bound[0],unbound[0])
 
-
-    @staticmethod
-    def bondfunction(snapshot, group_A_atoms, group_B_atoms,group_C_atoms, group_D_atoms,coeff=-1):
-        import numpy as np
-
-        A_com = snapshot.xyz[group_A_atoms, :]
-        B_com = snapshot.xyz[group_B_atoms, :]
-        C_com = snapshot.xyz[group_C_atoms, :]
-        D_com = snapshot.xyz[group_D_atoms, :]
-
-        ab = A_com - B_com
-        cd = C_com - D_com
-
-
-
-        # Calculate the angle between the two vectors
-        angle = np.linalg.norm(ab) + coeff * np.linalg.norm(cd)
-        return angle
-
     @staticmethod
     def bond(snapshot, group_A_atoms, group_B_atoms,type=0):
         import numpy as np
@@ -113,8 +94,8 @@ class CV:
         B_com = np.atleast_2d(B_com)
 
         if type==0:
-            A_com = np.mean(A_com, axis=1)
-            B_com = np.mean(B_com, axis=1)
+            A_com = np.mean(A_com, axis=0)
+            B_com = np.mean(B_com, axis=0)
             ab = A_com - B_com
             # Calculate the angle between the two vectors
             angle = np.linalg.norm(ab)
@@ -132,7 +113,7 @@ class CV:
             return np.max(dists)
         else:
             raise ValueError(f"Unknown bond type: {type}")
-        
+
     @staticmethod
     def CN(snapshot, group_A_atoms, group_B_atoms, d0=1.25, n=12, m=24):
         d0 = d0/10  # in nm
