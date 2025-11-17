@@ -1,0 +1,142 @@
+################################# SYSTEM
+@SET CMD                   FALSE                  
+@SET SLAB                  0
+################################# GLOBAL
+@SET SYSNAME               02
+@SET RTYPE                 MD
+@SET RESTART               FALSE
+
+
+@SET PRINT_VHARTREE        FALSE
+@SET PRINT_EDENSITY        FALSE
+
+################################# FORCE_EVAL
+@SET SCHARGE               0
+@SET SMULTIPLICITY         2
+@SET LSD                   FALSE
+@SET QS_METHOD             GPW
+@SET BASIS_FILE            /home/lingshuz/app/cp2k-9.1/data/BASIS_MOLOPT
+@SET BASIS_FILE_1          /home/lingshuz/app/cp2k-9.1/data/EMSL_BASIS_SETS
+@SET POTENTIAL_FILE        /home/lingshuz/app/cp2k-9.1/data/POTENTIAL
+@SET DFTD3_NAME            /home/lingshuz/app/cp2k-9.1/data/dftd3.dat
+@SET COORD_NAME            coord.xyz
+@SET COORD_FORMAT          XYZ
+@SET BOXSIZE               20
+
+@SET PERIODIC              NONE
+@SET POSSION               WAVELET
+
+@SET CUTOFF                400
+@SET GRIDS                 5
+@SET RELCUTOFF             50
+@SET SCF_CONV              1.0E-6 
+@SET SCF_NCYCLES           15
+@SET SCF_OCYCLES           10
+
+@IF (${RESTART} == TRUE )
+  @SET SCF_GUESS            RESTART
+@ENDIF
+@IF (${RESTART} == FALSE )
+  @SET SCF_GUESS            ATOMIC
+@ENDIF
+
+
+
+##################################################################
+
+&GLOBAL
+  PRINT_LEVEL LOW
+  PROJECT cp2k
+  RUN_TYPE $RTYPE
+&END GLOBAL
+
+
+
+#&EXT_RESTART
+#   RESTART_FILE_NAME cp2k-1.restart
+#&END EXT_RESTART
+
+
+
+
+# # GEO_OPT or MD
+@SET METHOD QS
+@SET a 1
+@include force_eval.inp
+
+
+
+&MOTION
+  # &GEO_OPT
+  #   &BFGS
+  #     &RESTART
+  #       &EACH
+  #         QS_SCF 0
+  #       &END EACH
+  #     &END RESTART
+  #   &END BFGS
+  # &END GEO_OPT
+  &MD
+    ENSEMBLE NVT
+    STEPS 5000
+    TIMESTEP 1
+    TEMPERATURE 320
+    # COMVEL_TOL 0
+
+    &THERMOSTAT
+     TYPE NOSE
+     &NOSE
+        LENGTH 4
+        YOSHIDA 9
+        TIMECON  50.0
+        MULTIPLE_TIME_STEPS 2
+    &END NOSE
+    &CSVR
+      TIMECON 50
+    &END
+    &END
+  &END MD
+&CONSTRAINT
+    &FIXED_ATOMS
+      COMPONENTS_TO_FIX XYZ
+      LIST 1..64
+    &END FIXED_ATOMS
+    #&COLLECTIVE
+    #  TARGET [deg] 170
+      # TARGET_GROWTH [deg/fs] 0.03
+      # TARGET_LIMIT [deg] 179.5
+    #  INTERMOLECULAR
+    #  COLVAR 1
+      #&RESTRAINT
+      #  K [kcalmol/degi^2] 0.03
+      #&END RESTRAINT
+    #&END COLLECTIVE
+    #&LAGRANGE_MULTIPLIERS
+    #  COMMON_ITERATION_LEVELS 1
+    #&END LAGRANGE_MULTIPLIERS
+  &END CONSTRAINT
+
+&PRINT
+&RESTART
+&EACH
+MD 10
+&END EACH
+&END RESTART
+
+&STRESS LOW
+&EACH
+MD 1
+&END EACH
+&END STRESS
+
+   &TRAJECTORY
+    FORMAT XYZ
+    PRINT_ATOM_KIND T
+    &EACH
+     GEO_OPT 1
+     MD 1
+    &END
+   &END TRAJECTORY
+&END PRINT
+
+&END MOTION

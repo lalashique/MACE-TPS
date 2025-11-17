@@ -6,6 +6,9 @@ from loguru import logger
 from pathlib import Path
 import yaml
 import os
+import time
+
+import numpy as np
 
 warnings.filterwarnings("ignore")
 
@@ -26,9 +29,11 @@ class MLP(ABC):
     @abstractmethod
     def predict(self, data):
         pass
-
-
-
+    
+    # @abstractmethod 
+    # @staticmethod
+    # def run_md(model_paths, structure, md_params):
+    #     pass
 
 # --- MACE implementation ---
 class MACE_MLP(MLP):
@@ -67,6 +72,7 @@ class MACE_MLP(MLP):
         self.config = self._get_config()
 
         self.E0s = E0s
+            
         # from mace.cli.run_train import main as mace_train
         # from mace.calculators import mace_calculator
         # self._train_func = mace_train
@@ -163,6 +169,13 @@ class MACE_MLP(MLP):
         with open(tmp_cfg, "w") as f:
             yaml.safe_dump(cfg, f)
 
+        # put a PAUSE file in the output dir to indicate preparation is done
+        pause_file = out / "PAUSE"
+        with open(pause_file, "w") as f:
+            f.write("")  # empty PAUSE file
+        
+        out = out.resolve()
+
         return f"cd {out} && python -m mace.cli.run_train --config train_seed{seed}.yaml"
 
     def _run_training(self, command):
@@ -200,7 +213,121 @@ class MACE_MLP(MLP):
             return self.model.calculate(data)
         else:
             raise RuntimeError("No model loaded.")
+    @staticmethod
+    def run_md(model_path, md_params,plumed=None):
+        from ase.io import read
+        from mace.calculators import MACECalculator
+        from ase import Atoms
+        from ase.calculators.plumed import Plumed
+        from ase import units
+        import json 
 
+        try:
+            model_path = model_path if isinstance(model_path, Path) else Path(model_path)
+        except Exception as e:
+            raise ValueError(f"Invalid model path: {model_path}") from e
+        try:
+            with open('smd.json', 'r') as f:
+                md_params = json.load(f)
+        except Exception as e:
+            raise ValueError(f"Error reading md_params: {md_params}") from e
+        
+        
+        initial_time = time.time()
+
+        init_conf = read('coord.xyz', '0')
+
+        #check if cell is present in the xyz file
+        if init_conf.cell is None or init_conf.cell.any() == 0:
+            #check if md_params has cell
+            if "cell" in md_params:
+                init_conf.cell = md_params["cell"]
+                init_conf.center()
+                init_conf.set_pbc((True, True, True))
+            else:
+                raise ValueError("Cell parameters are missing in both the coord file and md_params.")
+        # init_conf.cell = ([ 11.24800,9.7410,40])
+        # init_conf.set_pbc((True, True, True))
+        print(init_conf)
+
+        calculator = MACECalculator(model_paths= model_path, device='cuda')
+        # init_conf.set_calculator(calculator)
+        # check if timestep 
+        timestep = float(md_params.get("timestep", 1.0))*units.fs  # default 1 fs
+        ps = 1000 * units.fs
+        if plumed:
+            plumed = Path(plumed)
+            #check if plumed file exists
+            if not plumed.exists():
+                raise FileNotFoundError(f"Plumed file not found: {plumed}")
+            setup = [f"UNITS LENGTH=A TIME={1/ps} ENERGY={units.mol/units.kJ}",f'INCLUDE FILE={str(plumed)}']
+            # with open('plumed.dat', 'r') as f:
+            #         for line in f:
+            #                 if line.strip() and not line.startswith('#'):
+            #                         setup.append(line.strip())
+
+            init_conf.calc = Plumed(calc=calculator,
+                                    input=setup,
+                                    timestep=timestep,
+                                    atoms=init_conf,
+                                    kT=0.03)
+        else:
+            init_conf.calc = calculator
+
+        from ase.md.langevin import Langevin
+        temperature = md_params.get("temperature", 330)  # default 300 K
+        friction = md_params.get("friction", 5e-3)  # default 5e-3 1/fs
+        dyn = Langevin(init_conf, timestep, temperature_K=temperature, friction=friction,logfile='md_out.log')
+        def write_frame():
+                dyn.atoms.write('md_out.xyz', append=True)
+        def write_frame_small():
+                dyn.atoms.write('md_out_small.xyz', append=True)
+        step = 0
+        def write_time():
+                nonlocal step
+                if step == 0:
+                        step = time.time()
+                time_per_step = time.time() - step
+                with open('md_out.time', 'a') as f:
+                        f.write(str(time_per_step)+'\n')
+                step = time.time()
+
+        interval = int(md_params.get("interval", 1))
+        small_interval = int(md_params.get("small_interval", 50))
+        dyn.attach(write_frame, interval=interval)
+        dyn.attach(write_frame_small, interval=small_interval)
+        dyn.attach(write_time, interval=1)
+
+        total_steps = int(md_params.get("total_steps", 15000))
+        dyn.run(total_steps)
+        print("MD finished!")
+        pause_file = Path("PAUSE")
+        if pause_file.exists():
+            pause_file.unlink()
+
+        with open('md_out.time', 'a') as f:
+            f.write(str(time.time() - initial_time)+'\n')
+
+    @staticmethod
+    def evaluate_committee(atoms,committee_calcs):
+        """Compute committee energy/force variances and store in atoms.info/arrays."""
+        main_calc = atoms.calc  # backup
+        energies, forces = [], []
+        for i, calc in enumerate(committee_calcs):
+            atoms.calc = calc
+            energies.append(atoms.get_potential_energy())
+            forces.append(atoms.get_forces())
+            atoms.info[f"energy_m{i+1}"] = energies[-1]
+            if i == 0:
+                atoms.arrays["forces"] = forces[-1]
+            # del atoms.arrays['momenta']
+
+        energies = np.array(energies)
+        forces = np.stack(forces)
+        atoms.info["energy_variance"] = np.var(energies)
+        atoms.info["force_variance"] = np.var(forces, axis=0).mean()
+        atoms.arrays["force_var_per_atom"] = np.var(forces, axis=0).mean(axis=1)
+        atoms.calc = main_calc  # restore
 # --- Factory helper ---
 def create_mlp(method,*args, **kwargs):
     if method.lower() == "mace":
@@ -210,9 +337,46 @@ def create_mlp(method,*args, **kwargs):
 
 
 if __name__ == "__main__":
-    
-    mlp = create_mlp("mace", "train.yaml",
-                     E0s={1: -13.52638614, 6: -145.7828756, 8: -429.0792406, 29: -1303.851651})
-    mlp.train(train_file="train.xyz", test_file="test.xyz", seeds=[123, 234, 345], prepare_only=True,absolute_paths=True)
-    # mlp.load("mace_model.model")
-    # result = mlp.predict(structure)
+    import argparse
+    import inspect
+    p = argparse.ArgumentParser()
+
+    # pick which method
+    p.add_argument("method", choices=["run_md"])
+    args, remaining = p.parse_known_args()
+    logger.debug(f"Arguments: {args}, Remaining: {remaining}")
+    if args.method:
+        # fallback / default behavior
+
+        # otherwise run the selected static method
+        fn = getattr(MACE_MLP, args.method, None)
+        if fn:
+            # get the function
+            fn = getattr(MACE_MLP, args.method)
+
+            # inspect args
+            sig = inspect.signature(fn)
+
+            # build dynamic parser for this method
+            p2 = argparse.ArgumentParser()
+            for name, param in sig.parameters.items():
+                if param.default is inspect._empty:
+                    p2.add_argument(f"--{name}", required=True)
+                else:
+                    p2.add_argument(f"--{name}", default=param.default)
+
+            args2 = p2.parse_args(remaining)
+
+            # call function
+            kwargs = vars(args2)
+            out = fn(**kwargs)
+        else:
+            print(f"unknown method: {args.method}")
+            exit(1)
+    else:
+        print("no method given → running default stuff")
+        # REMOVE BELOW: example usage
+        # mlp = create_mlp("mace", "train.yaml",
+        #                 E0s={1: -13.52638614, 6: -145.7828756, 8: -429.0792406, 29: -1303.851651})
+        # mlp.train(train_file="train.xyz", test_file="test.xyz", seeds=[123, 234, 345], prepare_only=True,absolute_paths=True)
+

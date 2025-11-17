@@ -1,0 +1,28 @@
+{
+  "engine": "cp2k",
+  "run_mode": "prepare",
+  "coord1.xyz": {
+    "status": 0
+  },
+  "coord2.xyz": {
+    "status": 0
+  },
+  "coord3.xyz": {
+    "status": 0
+  },
+  "coord4.xyz": {
+    "status": 0
+  },
+  "0/coord1.xyz": {
+    "status": 0
+  },
+  "0/coord2.xyz": {
+    "status": 0
+  },
+  "0/coord3.xyz": {
+    "status": 0
+  },
+  "0/coord4.xyz": {
+    "status": 0
+  }
+}

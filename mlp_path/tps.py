@@ -10,6 +10,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from copy import deepcopy
 import argparse
+import time
 from pathlib import Path
 
 import openpathsampling as paths
@@ -47,6 +48,9 @@ from util import CV
 
 from abc import ABC, abstractmethod
 
+import pickle
+
+from loguru import logger
 
 
 # --- Interfaces / abstract base classes ---
@@ -86,6 +90,8 @@ class ISetup(ABC):
         
         #MACE 
         self.mace_path = self.config['mace_model_path']
+        if isinstance(self.mace_path, list):
+            self.mace_path = self.mace_path[0]  # take first for single model setup
         # TPS Specific settings
         self.TPS_settings = self.config.get("TPS_settings")
         self.n_frames_max = self.TPS_settings["n_frames_max"]
@@ -136,10 +142,10 @@ class ISetup(ABC):
         
         # Obtain an initial state of the system 
         # with the correct corresponding boundaries.
-        print("Extracting the topology and creating the system...")
-        print(self.resource_directory)
-        print(os.path.dirname(os.path.abspath(os.getcwd())))
-        atoms = read('top.pdb')
+        logger.debug("Extracting the topology and creating the system...")
+        logger.debug(self.resource_directory)
+        logger.debug(os.getcwd())
+        atoms = read(self.config.get("top_file","top.pdb"))
 
         pos = atoms.get_positions() / 10
         box_vectors = atoms.get_cell() / 10
@@ -161,7 +167,7 @@ class ISetup(ABC):
         if max(atoms.get_cell().cellpar()[:3]) > 0:
             topology.setPeriodicBoxVectors(vectors=box_vectors)
 
-        prmtop = MLPotential("mace",modelPath=self.mace_path)
+        prmtop = MLPotential("mace",modelPath=self.mace_path,device="cuda")
 
         system = prmtop.createSystem(topology,nl="torch",    max_n_pairs=-1)
 
@@ -176,10 +182,7 @@ class ISetup(ABC):
         # init_simulation.loadState(str(self.resource_directory)+ "/cb7_b2_mdV_cont2.state")
         newboxVectors=  init_simulation.context.getState(getParameters=True).getPeriodicBoxVectors()
         init_simulation.topology.setPeriodicBoxVectors(newboxVectors)
-        # print("hier ben ik nu 2")
-        # print(newboxVectors)
-        # oldboxVectors = init_simulation.topology.getPeriodicBoxVectors()
-        # print(oldboxVectors)
+
         positions = init_simulation.context.getState(getPositions=True).getPositions(asNumpy=True)
 
         # print(positions)
@@ -213,23 +216,22 @@ class Sampler(ISampler):
         self,
         setup_class:ISetup,  # e.g. TPS_setup or TIS_setup
         directory=".",
-        config_file="config.json",
-        n_steps=1000,
-        step=20,
-        trajectory_path="p1.xyz",
         output_path=None,
         ops_storage_path="tps_storage.db",
         save_final_traj=False,
         final_traj_storage_path=None,
         system_resource_directory="",
+        prepare_only=False,  # <--- new flag
+        absolute_paths=False,  # <--- new option
+        pickle_path=None,  # optional path to save pickled sampler
     ):
         # store args
         self.setup_class = setup_class
         self.directory = Path(directory)
-        self.config_file = config_file
-        self.n_steps = n_steps
-        self.step = step
-        self.traj_path = Path(trajectory_path)
+        self.config_file = setup_class.config
+        self.n_steps = self.config_file.get("tot_mc_steps", 100)
+        self.step = self.config_file.get("save_every", 20)
+        self.traj_path = Path(self.config_file.get("init_path", "tps.xyz"))
         self.output_path = Path(output_path) if output_path else self.directory
         if os.path.exists(self.output_path) is False:
             os.makedirs(self.output_path)
@@ -238,10 +240,71 @@ class Sampler(ISampler):
         self.final_traj_storage_path = final_traj_storage_path
         self.system_resource_directory = system_resource_directory 
 
+        self.prepare_only = prepare_only
+        self.absolute_paths = absolute_paths
+        self.pickle_path = pickle_path
+
+        # placeholders to be created later
+        self.setup = None
+        self.engine = None
+        self.template = None
+
+    def __getstate__(self):
+        # Remove unpickleable objects
+        state = self.__dict__.copy()
+        # engine, setup, template etc should not be pickled
+        for key in [ 'setup', 'engine', 'template']:
+            state.pop(key, None)
+        return state
+
+    def __setstate__(self, state):
+        # Restore state
+        self.__dict__.update(state)
+        # Recreate setup and engine when unpickled
+        config_path = self.directory / self.config_file
+        self.setup = self.setup_class(config_path, resource_directory=self.system_resource_directory)
+        paths.PathMover.engine = self.setup.md_engine
+        self.engine = self.setup.md_engine
+        self.template = self.setup.template
 
     def run(self):
-        config_path = self.directory / self.config_file
-        setup = self.setup_class(config_path, resource_directory=self.system_resource_directory, print_config_bool=True)
+        # config_path = self.directory / self.config_file
+
+        # --- HPC prepare-only mode ---
+        if self.prepare_only:
+            # create folders
+            base_path = Path.cwd() if self.absolute_paths else Path(".")
+            os.makedirs(self.output_path, exist_ok=True)
+            # if self.final_traj_storage_path:
+            #     os.makedirs(self.final_traj_storage_path, exist_ok=True)
+
+            # save pickled sampler
+            if self.pickle_path:
+                with open(self.pickle_path, "wb") as f:
+                    pickle.dump(self, f)
+                logger.debug(f"[Sampler pickled to: {self.pickle_path}]")
+
+            # print HPC command
+            cmd = (
+                f"python {Path(__file__).name} "
+                f"--run_pickled {self.pickle_path}"
+            )
+            logger.debug(f"[Prepared workflow folder: {self.output_path}]")
+            logger.debug("\nRun the following on HPC to execute the full TPS:\n")
+            logger.debug(cmd)
+            return cmd
+
+        # --- If running from pickled object or normally ---
+        # check if setup/engine already exists
+        # if self.setup is None:
+        #     setup = self.setup_class(config_path, resource_directory=self.system_resource_directory)
+        #     paths.PathMover.engine = self.setup.md_engine
+        #     self.engine = self.setup.md_engine
+        #     self.template = self.setup.template
+
+        
+        # --- normal run mode ---
+        setup = self.setup_class
 
         paths.PathMover.engine = setup.md_engine
 
@@ -260,7 +323,7 @@ class Sampler(ISampler):
             old_store.close()
             init_traj = ops_openmm.trajectory_from_mdtraj(mdtraj_traj)
         elif traj_path.suffix == ".xyz":
-            mdt = mdtraj.load("top.pdb")
+            mdt = mdtraj.load(self.config_file.get("top_file","top.pdb"))
             print("top loaded")
             traj = mdtraj.load(traj_path, top=mdt)
             print("traj loaded",)
@@ -285,7 +348,7 @@ class Sampler(ISampler):
 
         # generic network setup placeholder (replace later for TIS)
         print("Defining CV and states...")
-        cv = CV(config_path, self.traj_path)
+        cv = CV(self.config_file, self.traj_path)
         print("Creating TPS network...","states:",cv.states)
         network = paths.TPSNetwork.from_states_all_to_all(cv.states)
 
@@ -321,29 +384,183 @@ class Sampler(ISampler):
             final_storage.save(storage.steps[-1].active[0].trajectory)
             final_storage.close()
         storage.close()
+    
+    @staticmethod
+    def path_extension(traj, n_steps, engine,direction=["forward","backward"]):
+        """Extend a trajectory by n_steps using the given engine."""
+        last_frame = traj.frames[-1]
+        engine.current_snapshot = last_frame
+        extended_traj = engine.generate_trajectory(n_steps=n_steps)
+        return traj + extended_traj
 
 
 
 
 class TPS_setup(ISetup):
     def __init__(self, config_path: Path, resource_directory: Path = Path("."), print_config_bool=True):
-        super().__init__(config_path, resource_directory, print_config_bool)
+        super().__init__( config_path, resource_directory, print_config_bool)
+        # logger.debug(self.config)
+
+import argparse
+import pickle
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--run_pickled", type=str, help="Path to pickled Sampler object to run")
+parser.add_argument("--prepare_only", action="store_true", help="Only prepare folders and print HPC command")
+parser.add_argument("--absolute_paths", action="store_true", help="Use absolute paths in HPC command")
+args, _ = parser.parse_known_args()
+
+if args.run_pickled:
+    # Load the pickled sampler
+    with open(args.run_pickled, "rb") as f:
+        sampler = pickle.load(f)
+    sampler.prepare_only = False
+    sampler.absolute_paths = False  # HPC run uses the paths in the pickle
+    sampler.run()
 
 
 if __name__ == "__main__":
     # Example usage
-    tps = TPS_setup("config.json")
+    tps = TPS_setup("tps.json")
     sampler = Sampler(
-        setup_class=TPS_setup,
+        setup_class=tps,
         directory=".",
-        config_file="config.json",
-        n_steps=100,
-        trajectory_path="p1.xyz",
         output_path="output",
         ops_storage_path="tps_storage.db",
-        save_final_traj=True,
-        final_traj_storage_path="output/final_traj",
-        system_resource_directory="."
+        final_traj_storage_path="traj",
+        system_resource_directory=".",
+        absolute_paths=True
     )
  
-    sampler.run()
+    # sampler.run()
+
+    # Extend the tps paths
+    logger.debug("Extending TPS trajectories...")
+    import ase.units as units
+    nsteps = sampler.config_file.get("extend_steps", 100)
+    timestep = sampler.config_file.get("Integrator_settings")["dt"]
+    temp = sampler.config_file.get("Integrator_settings")["temperature"]
+    friction = sampler.config_file.get("Integrator_settings")["friction"]
+
+    logger.debug(f"Using device: {torch.device}")
+    #check if multiple models are provided
+
+    from mace.calculators import MACECalculator
+    mace_model_paths = sampler.config_file.get("mace_model_path")
+    if isinstance(mace_model_paths, list):
+        # committee_models = []
+        committee_calcs = [MACECalculator(model_paths=[m], device=sampler.config_file.get("platform_name", "cuda").lower()) for m in mace_model_paths]
+
+        logger.debug(f"Using committee of {len(committee_calcs)} models for extension.")
+    else:
+        raise ValueError("mace_model_path should be a list of model paths for committee evaluation.")
+
+    folder = Path(sampler.final_traj_storage_path).resolve()
+    traj_list = [f for f in os.listdir(folder)
+                if f.endswith(".xyz") and not f.startswith("._") and f != "accepted_0.xyz"]
+    traj_list = [folder / f for f in traj_list]
+    logger.info(f"Found {len(traj_list)} trajectories in {folder}.")
+
+    from mlp import MACE_MLP
+    evaluate_committee = MACE_MLP.evaluate_committee
+    cell = read(Path(sampler.config_file.get("top_file","top.pdb")).resolve()).get_cell() 
+    # make extend folder
+    # os.makedirs(folder/"extend", exist_ok=True)
+    extend_folder =     folder/"extend"
+    os.makedirs(extend_folder, exist_ok=True)
+
+    from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
+    from ase.md.langevin import Langevin
+
+
+    for traj_file in traj_list:
+
+        logger.info(f"Processing {traj_file}")
+        base_name = traj_file.name.replace(".xyz", "")
+
+        # --- read only first and last frames efficiently ---
+        logger.info(f"  Reading trajectory.. {traj_file}")
+        orig_traj = read(f"{traj_file}", index=":")
+        atoms_first = orig_traj[0].copy()
+        atoms_last = orig_traj[-1].copy()
+
+        frames = []
+        for i, atoms in enumerate(orig_traj):
+            atoms = atoms.copy()
+            atoms.cell = cell
+            # atoms.center()
+            atoms.set_pbc((True, True, True))
+            atoms.calc = committee_calcs[0]
+            # if i % 100 == 0:
+            evaluate_committee(atoms,committee_calcs=committee_calcs)
+            frames.append(atoms.copy())
+            logger.info(f"    Frame {i}/{len(orig_traj)} processed")
+
+        out_file = f"{base_name}.xyz"
+        write(extend_folder/out_file, frames)
+        logger.info(f"  Saved full trajectory with committee stats → {out_file}")
+        frames.clear()
+
+        for direction, atoms in zip(["backward", "forward"], [atoms_first, atoms_last]):
+            logger.info(f"  Running {direction} MD")
+
+            atoms.cell = cell
+            # atoms.center()
+            atoms.set_pbc((True, True, True))
+            atoms.calc = committee_calcs[0]
+
+            # initialize random velocities
+            MaxwellBoltzmannDistribution(atoms, temperature_K=temp)
+            if direction == "backward":
+                atoms.set_velocities(-atoms.get_velocities())
+
+            out_file = f"{base_name}_{direction}.xyz"
+            if os.path.exists(extend_folder/out_file):
+                os.remove(extend_folder/out_file)
+
+            frames = []  # buffer
+
+            dyn = Langevin(atoms, timestep, temperature_K=temp, friction=friction)
+            def buffer_frame():
+                logger.info(f"    Step {dyn.nsteps}/{nsteps} ")
+                # c_time = time.time()
+                # logger.info(f"Time per frame {c_time - start:.1f}s")
+                evaluate_committee(atoms,committee_calcs=committee_calcs)
+                frames.append(atoms.copy())
+                
+            # def write_frame():
+                # evaluate_committee(atoms)
+                # atoms.write(out_file, append=True, write_results=False)
+
+            dyn.attach(buffer_frame, interval=1)
+
+            start = time.time()
+            dyn.run(nsteps)
+            logger.info(f"    Runtime {direction}: {time.time() - start:.1f}s")
+            for atoms in frames:
+                # atoms.arrays['forces'] = atoms.get_forces()
+                if 'momenta' in atoms.arrays:
+                    del atoms.arrays['momenta']
+
+            # write once at end
+            write(extend_folder/out_file, frames)
+            frames.clear()
+
+            logger.info(f"    Saved → {out_file}")
+            # --- end of MD ---
+
+
+        # --- merge trajectories ---
+        logger.info("  Merging extended trajectory...")
+        backward = read(extend_folder/f"{base_name}_backward.xyz", index=":")
+        forward = read(extend_folder/f"{base_name}_forward.xyz", index=":")
+        backward = backward[::-1]  # reverse time order
+
+        orig_traj = read(extend_folder/f"{base_name}.xyz", index=":")
+
+        # orig_traj = read(f"{folder}/{traj}", index=":")
+        extended = backward + orig_traj + forward
+        out_name = f"{base_name}_extended.xyz"
+        write(extend_folder/out_name, extended)
+        logger.info(f"  Saved → {out_name}\n")
+        
