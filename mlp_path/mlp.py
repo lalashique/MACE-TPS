@@ -214,9 +214,9 @@ class MACE_MLP(MLP):
         else:
             raise RuntimeError("No model loaded.")
     @staticmethod
-    def run_md(model_path, md_params,plumed=None):
+    def run_md(model_path, md_params,plumed=None, esen_foundational_model=False):
         from ase.io import read
-        from mace.calculators import MACECalculator
+        
         from ase import Atoms
         from ase.calculators.plumed import Plumed
         from ase import units
@@ -249,8 +249,13 @@ class MACE_MLP(MLP):
         # init_conf.cell = ([ 11.24800,9.7410,40])
         # init_conf.set_pbc((True, True, True))
         print(init_conf)
-
-        calculator = MACECalculator(model_paths= model_path, device='cuda')
+        #using one of the esen foundation models
+        if esen_foundational_model:
+            from fairchem.core import FAIRChemCalculator
+            calculator = FAIRChemCalculator.from_model_checkpoint(name_or_path=str(model_path), device="cuda")
+        else:
+            from mace.calculators import MACECalculator
+            calculator = MACECalculator(model_paths= model_path, device='cuda')
         # init_conf.set_calculator(calculator)
         # check if timestep 
         timestep = float(md_params.get("timestep", 1.0))*units.fs  # default 1 fs
@@ -273,7 +278,8 @@ class MACE_MLP(MLP):
                                     kT=0.03)
         else:
             init_conf.calc = calculator
-
+        
+        from ase.md import MDLogger
         from ase.md.langevin import Langevin
         temperature = md_params.get("temperature", 330)  # default 300 K
         friction = md_params.get("friction", 5e-3)  # default 5e-3 1/fs
@@ -294,6 +300,8 @@ class MACE_MLP(MLP):
 
         interval = int(md_params.get("interval", 1))
         small_interval = int(md_params.get("small_interval", 50))
+        dyn.attach(MDLogger(dyn, init_conf, 'md.log', header=True, stress=False,
+           peratom=True, mode="a"), interval=100)
         dyn.attach(write_frame, interval=interval)
         dyn.attach(write_frame_small, interval=small_interval)
         dyn.attach(write_time, interval=1)
