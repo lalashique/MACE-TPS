@@ -85,6 +85,9 @@ def save_from_storage( storage_path, config, out_folder):
         elif f"rejected_same_{i}.xyz" in traj_list:
             rejected += 1
             continue #
+        else:
+            break
+    logger.info(f"Resuming from index {i}...")
     start = i
     for idx  in range(start,end):
         try:
