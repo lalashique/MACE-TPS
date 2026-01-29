@@ -214,7 +214,7 @@ class MACE_MLP(MLP):
         else:
             raise RuntimeError("No model loaded.")
     @staticmethod
-    def run_md(model_path, md_params,plumed=None, esen_foundational_model=False):
+    def run_md(model_path, md_params,plumed=None,type= "local"):
         from ase.io import read
         
         from ase import Atoms
@@ -222,30 +222,41 @@ class MACE_MLP(MLP):
         from ase import units
         import json 
 
+
+        if type == "local":
+            try:
+                model_path = model_path if isinstance(model_path, Path) else Path(model_path)
+            except Exception as e:
+                raise ValueError(f"Invalid model path: {model_path}") from e
+
+        elif type == "universal":
+            raise NotImplementedError("Universal type MD is not implemented yet.")
+        
         try:
-            model_path = model_path if isinstance(model_path, Path) else Path(model_path)
-        except Exception as e:
-            raise ValueError(f"Invalid model path: {model_path}") from e
-        try:
-            with open('smd.json', 'r') as f:
+            with open(md_params, 'r') as f:
                 md_params = json.load(f)
         except Exception as e:
             raise ValueError(f"Error reading md_params: {md_params}") from e
-        
-        
         initial_time = time.time()
-
-        init_conf = read('coord.xyz', '0')
-
-        #check if cell is present in the xyz file
-        if init_conf.cell is None or init_conf.cell.any() == 0:
-            #check if md_params has cell
-            if "cell" in md_params:
-                init_conf.cell = md_params["cell"]
-                init_conf.center()
-                init_conf.set_pbc((True, True, True))
-            else:
-                raise ValueError("Cell parameters are missing in both the coord file and md_params.")
+        restart = md_params.get("restart", False)
+        initalize_velocities = md_params.get("initialize_velocities", True)
+        if restart:
+            if not Path('md_out.xyz').exists():
+                raise FileNotFoundError("md_out.xyz not found for restart.")
+            init_conf = read('md_out.xyz', -1)
+            logger.debug(f"Restarting MD from md_out.xyz with {len(init_conf)} atoms.")
+        else:   
+            init_conf = read('coord.xyz', '0')
+        if "cell" in md_params:
+            logger.debug(f"Setting cell from md_params{np.diag(np.array(md_params['cell'],dtype=float))}.")
+            init_conf.cell = np.diag(np.array(md_params["cell"],dtype=float))
+            init_conf.center()
+            init_conf.set_pbc((True, True, True))
+        elif init_conf.cell is not None and not init_conf.cell.any() == 0:
+            logger.debug(f"Using cell from coord file: {init_conf.cell}.")
+            init_conf.set_pbc((True, True, True))
+        else:
+            raise ValueError("Cell parameters are missing in both the coord file and md_params.")
         # init_conf.cell = ([ 11.24800,9.7410,40])
         # init_conf.set_pbc((True, True, True))
         print(init_conf)
@@ -258,22 +269,23 @@ class MACE_MLP(MLP):
             calculator = MACECalculator(model_paths= model_path, device='cuda')
         # init_conf.set_calculator(calculator)
         # check if timestep 
-        timestep = float(md_params.get("timestep", 1.0))*units.fs  # default 1 fs
+        timestep = float(md_params.get("time_step",1.0))*units.fs  # default 1 fs
+        logger.debug(f"MD Timestep: {float(md_params.get('time_step',1.0))} fs")
         ps = 1000 * units.fs
+        logger.debug(f"MD Timestep: {ps} ps")
         if plumed:
             plumed = Path(plumed)
             #check if plumed file exists
             if not plumed.exists():
                 raise FileNotFoundError(f"Plumed file not found: {plumed}")
-            setup = [f"UNITS LENGTH=A TIME={1/ps} ENERGY={units.mol/units.kJ}",f'INCLUDE FILE={str(plumed)}']
-            # with open('plumed.dat', 'r') as f:
-            #         for line in f:
-            #                 if line.strip() and not line.startswith('#'):
-            #                         setup.append(line.strip())
+            setup = [f"UNITS LENGTH=A TIME={1/ps} ENERGY={units.mol/units.kJ}"]
+            if restart:
+                setup.append("RESTART")
+            setup.append(f'INCLUDE FILE={str(plumed)}')
 
             init_conf.calc = Plumed(calc=calculator,
                                     input=setup,
-                                    timestep=timestep,
+                                    timestep=timestep/units.fs/1000,
                                     atoms=init_conf,
                                     kT=0.03)
         else:
@@ -283,7 +295,28 @@ class MACE_MLP(MLP):
         from ase.md.langevin import Langevin
         temperature = md_params.get("temperature", 330)  # default 300 K
         friction = md_params.get("friction", 5e-3)  # default 5e-3 1/fs
-        dyn = Langevin(init_conf, timestep, temperature_K=temperature, friction=friction,logfile='md_out.log')
+
+        thermostat = md_params.get("thermostat", "Langevin")
+        if thermostat == "Langevin":
+            logger.debug(f"Using Langevin thermostat with friction {friction} 1/fs.")
+            dyn = Langevin(init_conf, timestep, temperature_K=temperature, friction=friction,logfile='md_out.log')
+        elif thermostat == "NoseHoover":
+            from ase.md.npt import NPT
+            pressure = md_params.get("pressure", 101325)  # default 1 atm
+            logger.debug(f"Using Nose-Hoover thermostat with pressure {pressure} Pa.")
+            dyn = NPT(init_conf, timestep, temperature_K=temperature, externalstress=pressure, ttime=25*timestep, pfactor=25*timestep,logfile='md_out.log')
+        elif thermostat == "Berendsen":
+            from ase.md.berendsen import Berendsen
+            tau = md_params.get("tau", 25*timestep)  # default 25*timestep
+            logger.debug(f"Using Berendsen thermostat with tau {tau} fs.")
+            dyn = Berendsen(init_conf, timestep, temperature_K=temperature, taut= tau,logfile='md_out.log')
+        elif thermostat == "VelocityVerlet":
+            from ase.md.velocityverlet import VelocityVerlet
+            logger.debug(f"Using Velocity Verlet integrator (NVE).")
+            dyn = VelocityVerlet(init_conf, timestep,logfile='md_out.log')
+        else:
+            raise ValueError(f"Unknown thermostat: {thermostat}")
+        
         def write_frame():
                 dyn.atoms.write('md_out.xyz', append=True)
         def write_frame_small():
@@ -300,8 +333,17 @@ class MACE_MLP(MLP):
 
         interval = int(md_params.get("interval", 1))
         small_interval = int(md_params.get("small_interval", 50))
-        dyn.attach(MDLogger(dyn, init_conf, 'md.log', header=True, stress=False,
-           peratom=True, mode="a"), interval=100)
+
+        if initalize_velocities and restart== False:
+            from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
+            MaxwellBoltzmannDistribution(init_conf, temperature_K=temperature)
+            logger.debug(f"Initialized velocities at {temperature} K using Maxwell-Boltzmann distribution.")
+        elif restart:
+            logger.debug(f"Restarting MD from existing velocities.")
+            init_conf.set_velocities(init_conf.get_velocities())
+        else:
+            logger.debug(f"Velocities not initialized.")
+
         dyn.attach(write_frame, interval=interval)
         dyn.attach(write_frame_small, interval=small_interval)
         dyn.attach(write_time, interval=1)
@@ -315,6 +357,55 @@ class MACE_MLP(MLP):
 
         with open('md_out.time', 'a') as f:
             f.write(str(time.time() - initial_time)+'\n')
+    
+    @staticmethod
+    def run_minimization(model_path, md_params,type= "local"):
+        from ase.io import read
+        from mace.calculators import MACECalculator
+        from ase import Atoms
+        from ase.optimize import BFGS
+        import json 
+
+        if type == "local":
+            try:
+                model_path = model_path if isinstance(model_path, Path) else Path(model_path)
+            except Exception as e:
+                raise ValueError(f"Invalid model path: {model_path}") from e
+
+        elif type == "universal":
+            raise NotImplementedError("Universal type minimization is not implemented yet.")
+        try:
+            with open(md_params, 'r') as f:
+                md_params = json.load(f)
+        except Exception as e:
+            raise ValueError(f"Error reading md_params: {md_params}") from e
+        
+        init_conf = read('coord.xyz', '0')
+
+        #check if cell is present in the xyz file
+        if "cell" in md_params:
+            logger.debug(f"Setting cell from md_params{np.diag(np.array(md_params['cell'],dtype=float))}.")
+            init_conf.cell = np.diag(np.array(md_params["cell"],dtype=float))
+            init_conf.center()
+            init_conf.set_pbc((True, True, True))
+        elif init_conf.cell is not None and not init_conf.cell.any() == 0:
+            logger.debug(f"Using cell from coord file: {init_conf.cell}.")
+            init_conf.set_pbc((True, True, True))
+        else:
+            raise ValueError("Cell parameters are missing in both the coord file and md_params.")
+
+        calculator = MACECalculator(model_paths= model_path, device='cuda')
+        init_conf.set_calculator(calculator)
+        def write_frame():
+                dyn.atoms.write('md_out.xyz', append=True)
+        dyn = BFGS(init_conf, trajectory='minimization.traj')
+        max_steps = int(md_params.get("max_steps", 1000))
+        fmax = float(md_params.get("fmax", 0.01))
+        interval = int(md_params.get("interval", 1))
+        dyn.attach(write_frame, interval=interval)
+
+        dyn.run(fmax=fmax, steps=max_steps)
+        print("Minimization finished!")
 
     @staticmethod
     def evaluate_committee(atoms,committee_calcs):
@@ -336,6 +427,43 @@ class MACE_MLP(MLP):
         atoms.info["force_variance"] = np.var(forces, axis=0).mean()
         atoms.arrays["force_var_per_atom"] = np.var(forces, axis=0).mean(axis=1)
         atoms.calc = main_calc  # restore
+    @staticmethod
+    def evaluate(model_path, input_file,output_file,type= "local"):
+        from ase.io import read, write
+        from mace.calculators import MACECalculator
+        from ase import Atoms
+        import copy
+
+        if type == "local":
+            try:
+                model_path = model_path if isinstance(model_path, Path) else Path(model_path)
+            except Exception as e:
+                raise ValueError(f"Invalid model path: {model_path}") from e
+
+        elif type == "universal":
+            raise NotImplementedError("Universal type evaluation is not implemented yet.")
+        
+        structures = read(input_file, ':')
+        calculator = MACECalculator(model_paths= model_path, device='cuda')
+        new_structures = []
+        results = []
+        for i, atoms in enumerate(structures):
+            atoms.calc = calculator
+            energy = atoms.get_potential_energy()
+            forces = atoms.get_forces()
+            if len(atoms) != forces.shape[0]:
+                raise ValueError(f"Number of atoms ({len(atoms)}) does not match number of forces ({forces.shape[0]}).")
+            atoms.info['predicted_energy'] = energy
+            atoms.arrays['predicted_forces'] = forces
+            new_structures.append(atoms.copy())
+            results.append((energy, forces))
+            print(f"Structure {i}: Energy = {energy} eV")
+            # break
+
+        write(output_file, new_structures)
+        print(f"Results written to {output_file}")
+        return results
+
 # --- Factory helper ---
 def create_mlp(method,*args, **kwargs):
     if method.lower() == "mace":
@@ -350,7 +478,7 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser()
 
     # pick which method
-    p.add_argument("method", choices=["run_md"])
+    p.add_argument("--method", choices=["run_md","run_minimization","evaluate"], nargs="?")
     args, remaining = p.parse_known_args()
     logger.debug(f"Arguments: {args}, Remaining: {remaining}")
     if args.method:

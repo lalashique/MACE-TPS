@@ -90,7 +90,13 @@ if __name__ == "__main__":
                 if gen==0:
                     structures = dft_config.get("structures")  # Placeholder for actual structures
                     logger.debug(f"[DFT] DFT Engine Running on {structures}...")
-                    structures = [Path(init_dir+ "/" + struct).resolve() for struct in structures]
+                    structures = [Path(init_dir/ struct).resolve() for struct in structures]
+                    # check the number of frames in the structures files if more than 1 continue
+                    # total_frames = 0
+                    for struct in structures:
+                        frames = len(read(struct, index=":"))
+                        if frames == 1:
+                            logger.info(f"[DFT WORKFLOW] run extension using mlp run_md ")
                 else:
                     structures = init_dir/"init"/"coord.xyz"
                     logger.debug(f"[DFT] DFT Engine Running on {structures}...")
@@ -147,6 +153,7 @@ if __name__ == "__main__":
                                 logger.debug(f"DFT calculation complete for {key}")
                             else:
                                 logger.debug(f"DFT calculation not complete for {key}.")
+                                exit(0)
                         else:
                             logger.debug(f"Output file {out_file} does not exist yet. Please run the DFT calculation.")
                             # print commands to run cp2k in the folder
@@ -201,52 +208,61 @@ if __name__ == "__main__":
                 mlp_workdir = Path(init_dir) / str(gen) / "mlp"
                 mlp_workdir.mkdir(parents=True, exist_ok=True)
 
-                dest_file = mlp_workdir / "data" / "combined_extdata.xyz"
-                dest_file.parent.mkdir(parents=True, exist_ok=True)
-                dft_workdir_path = Path(dft_workdir).resolve()
-                dft_output_path = dft_workdir_path / "output" / "combined_extdata.xyz"
-                shutil.copyfile(dft_output_path, dest_file)
+                mlp_json_loc = Path(mlp_workdir) / "mlp.json"
+
+                if not mlp_json_loc.exists():
+
+                    dest_file = mlp_workdir / "data" / "combined_extdata.xyz"
+                    dest_file.parent.mkdir(parents=True, exist_ok=True)
+                    dft_workdir_path = Path(dft_workdir).resolve()
+                    dft_output_path = dft_workdir_path / "output" / "combined_extdata.xyz"
+
+                    shutil.copyfile(dft_output_path, dest_file)
 
 
-                logger.debug(f"[MLP WORKFLOW] Combined extxyz files copied to {dest_file}")
-                import util.traj_util as tu
-                logger.debug(f"[MLP WORKFLOW] Splitting data into train and test sets...")
-                tu.train_test_split(str(dest_file), test_fraction=0.25)
-                logger.debug(f"[MLP WORKFLOW] Data split into train and test sets. ")
+                    logger.debug(f"[MLP WORKFLOW] Combined extxyz files copied to {dest_file}")
+                    import util.traj_util as tu
+                    logger.debug(f"[MLP WORKFLOW] Splitting data into train and test sets...")
+                    tu.train_test_split(str(dest_file), test_fraction=0.25)
+                    logger.debug(f"[MLP WORKFLOW] Data split into train and test sets. ")
 
-                logger.debug(f"[MLP] Changed working directory to: {os.getcwd()}")
-                # TODO : setup MLP json in the mlp_workdir to check if it was previously set up and then skip setup if so
-                # check if mlp.json exists in mlp_workdir
+                    logger.debug(f"[MLP] Changed working directory to: {os.getcwd()}")
+                    # TODO : setup MLP json in the mlp_workdir to check if it was previously set up and then skip setup if so
+                    # check if mlp.json exists in mlp_workdir
 
-                #read mlp.json file from init_dir
-                mlp_json_loc = Path(init_dir) / "mlp.json"
-                logger.debug(f"[MLP] Reading MLP json file from {mlp_json_loc}")
-                with open(mlp_json_loc, "r") as f:
+                    #read mlp.json file from init_dir
+                    mlp_json_loc = Path(init_dir) / "mlp.json"
+
+                    logger.debug(f"[MLP] Reading MLP json file from {mlp_json_loc}")
+                    with open(mlp_json_loc, "r") as f:
+                        try:
+                            mlp_config = json.load(f)
+                        except json.JSONDecodeError as e:
+                            logger.error(f"Error decoding JSON from {mlp_json_loc}: {e}")
+                            raise
                     try:
-                        mlp_config = json.load(f)
-                    except json.JSONDecodeError as e:
-                        logger.error(f"Error decoding JSON from {mlp_json_loc}: {e}")
-                        raise
-                try:
-                    E0s = mlp_config["E0s"]
-                except KeyError:
-                    logger.error("E0s not found in mlp.json")
-                    raise KeyError("E0s not found in mlp.json")
+                        E0s = mlp_config["E0s"]
+                    except KeyError:
+                        logger.error("E0s not found in mlp.json")
+                        raise KeyError("E0s not found in mlp.json")
 
-                logger.debug(f"[MLP] MLP Config: {mlp_config}")
+                    logger.debug(f"[MLP] MLP Config: {mlp_config}")
 
-                import yaml
-                # convert mlp_config to yaml and save as train.yaml in mlp_workdir
-                train_yaml_loc = mlp_workdir / "train.yaml"
-                with open(train_yaml_loc, "w") as f:
-                    yaml.safe_dump(mlp_config, f)
-                logger.debug(f"[MLP] MLP train.yaml saved to {train_yaml_loc}")
+                    import yaml
+                    # convert mlp_config to yaml and save as train.yaml in mlp_workdir
+                    train_yaml_loc = mlp_workdir / "train.yaml"
+                    with open(train_yaml_loc, "w") as f:
+                        yaml.safe_dump(mlp_config, f)
+                    logger.debug(f"[MLP] MLP train.yaml saved to {train_yaml_loc}")
 
-                logger.debug("[MLP] Creating MLP model...")    
-                from mlp import create_mlp
-                mlp = create_mlp("mace", "train.yaml", E0s=mlp_config["E0s"])
-                mlp.train(train_file=str(dest_file.parent / "train.xyz"), test_file=str(dest_file.parent / "test.xyz"), seeds=[123, 234, 345], prepare_only=True,absolute_paths=True)
-                logger.debug("[MLP] MLP model created and prepared for training.")
+                    logger.debug("[MLP] Creating MLP model...")    
+                    from mlp import create_mlp
+                    mlp = create_mlp("mace", "train.yaml", E0s=mlp_config["E0s"])
+                    mlp.train(train_file=str(dest_file.parent / "train.xyz"), test_file=str(dest_file.parent / "test.xyz"), seeds=[123, 234, 345], prepare_only=True,absolute_paths=True)
+                    logger.debug("[MLP] MLP model created and prepared for training.")
+                    exit(0)
+                else:
+                    logger.debug(f"[MLP WORKFLOW] mlp.json already exists in mlp folder. Skipping MLP setup.")
                 
                 # look for PAUSE files in mlp_workdir and remove them
                 for pause_file in mlp_workdir.glob("runs/committee_*/PAUSE"):
@@ -263,7 +279,7 @@ if __name__ == "__main__":
                             #     logger.debug(f"Removed PAUSE file at {pause_file}")
                         else:
                             logger.debug(f"Final Model file not found: {model_file}. Keeping PAUSE file. Please complete training.")
-                            raise 
+                            exit() 
                     # touch a DONE file in mlp_workdir to indicate mlp setup is done
                 done_file = Path(mlp_workdir) / "DONE"
                 done_file.touch()
@@ -381,7 +397,7 @@ if __name__ == "__main__":
                     except json.JSONDecodeError as e:
                         logger.error(f"Error decoding JSON from {dest}: {e}")
                         raise
-                tps_config["model_paths"] = model_paths[0]
+                tps_config["mace_model_path"] = model_paths
                 with open(dest, "w") as f:
                     json.dump(tps_config, f, indent=4) 
                 logger.debug(f"[TPS] Updated tps.json with model paths.")
@@ -394,6 +410,17 @@ if __name__ == "__main__":
                 dest = Path('tps.xyz')
                 dest.write_bytes(source.read_bytes())
                 logger.debug(f"[TPS] Copied tps.xyz to {dest}")
+
+                    #check if file exists top.pdb in init_dir
+                if not (Path(init_dir) / "top.pdb").exists():
+                    logger.error(f"[TPS] top.pdb not found in {init_dir}. Cannot proceed with TPS setup.")
+                    raise FileNotFoundError(f"top.pdb not found in {init_dir}. Cannot proceed with TPS setup.")
+                source = Path(init_dir) / "top.pdb"
+                dest = Path('top.pdb')
+                dest.write_bytes(source.read_bytes())
+                logger.debug(f"[TPS] Copied top.pdb to {dest}")
+
+
                 # from tps import TPS_setup, Sampler
                 logger.debug("Setting up TPS sampler...")
                 logger.info(f"""[TPS] To run TPS sampler, execute the following command:
@@ -423,23 +450,23 @@ if __name__ == "__main__":
 
                 combined_extend_file.parent.mkdir(parents=True, exist_ok=True)
 
-                # Option 1: Using shutil.copyfileobj (fastest for multiple files)
-                with open(combined_extend_file, "wb") as dest_f:
-                    for extxyz_file in extend_folder.glob("*_extended.xyz"):
-                        with open(extxyz_file, "rb") as src_f:
-                            shutil.copyfileobj(src_f, dest_f)
+                # # Option 1: Using shutil.copyfileobj (fastest for multiple files)
+                # with open(combined_extend_file, "wb") as dest_f:
+                #     for extxyz_file in extend_folder.glob("*_extended.xyz"):
+                #         with open(extxyz_file, "rb") as src_f:
+                #             shutil.copyfileobj(src_f, dest_f)
 
-                logger.debug(f"[TPS WORKFLOW] Combined extend traj files into {combined_extend_file}")
+                # logger.debug(f"[TPS WORKFLOW] Combined extend traj files into {combined_extend_file}")
 
                 # select frames from combined_extend_file using util.traj_util.select_frames_onefile
-                logger.debug(f"[TPS WORKFLOW] Selecting frames from combined extend traj...")
-                out_file = tps_workdir / "output" / "selected_frames.xyz"
-                select_frames(
-                    xyz_path=str(combined_extend_file),
-                    tps_params=tps_config,
-                    out_file=str(out_file),
-                )
-                logger.debug(f"[TPS WORKFLOW] TPS frame selection complete.")
+                # logger.debug(f"[TPS WORKFLOW] Selecting frames from combined extend traj...")
+                out_file = tps_workdir / "output" / "tps_selected_frames.xyz"
+                # select_frames(
+                #     xyz_path=str(combined_extend_file),
+                #     tps_params=tps_config,
+                #     out_file=str(out_file),
+                # )
+                # logger.debug(f"[TPS WORKFLOW] TPS frame selection complete.")
 
                 # copy outfile to init_dir for next gen
 
@@ -461,10 +488,13 @@ if __name__ == "__main__":
             logger.debug(f"Moved back to initial directory: {os.getcwd()}")
             # backup init_dir/init  to init_dir/gen/init and clean coords for next gen
             backup_init_dir = Path(init_dir) / str(gen) / "init"
-            if backup_init_dir.exists():
-                shutil.rmtree(backup_init_dir)
-            shutil.copytree(Path(init_dir) / "init", backup_init_dir)
-            logger.debug(f"Backed up init directory to {backup_init_dir}")
+            # if backup_init_dir.exists():
+            #     shutil.rmtree(backup_init_dir)
+            try:
+                shutil.copytree(Path(init_dir) / "init", backup_init_dir)
+                logger.debug(f"Backed up init directory to {backup_init_dir}")
+            except Exception as e:
+                logger.error(f"Failed to back up init directory: {e}")
 
             # remove all .xyz files from init_dir/init for next gen
             init_coords_dir = Path(init_dir) / "init"
@@ -477,6 +507,8 @@ if __name__ == "__main__":
             dest_file = init_coords_dir / "coord.xyz"
             shutil.copyfile(selected_frames_file, dest_file)
             logger.debug(f"Copied selected frames to {dest_file} for next generation DFT calculations.")
+            os.chdir(init_dir)
+            logger.debug(f"Returned to initial directory: {os.getcwd()}")
             gen += 1
             # ask if continue to next gen
             user_input = input(f"Continue to next generation {gen}? (y/N): ")

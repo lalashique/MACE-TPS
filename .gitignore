@@ -218,3 +218,11 @@ __marimo__/
 .LSOverride
 ._*
 */._*
+
+**/md_out.xyz
+
+# directory named test
+**/test/
+*.out 
+*.xyz
+*.pdb

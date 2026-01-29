@@ -31,7 +31,7 @@ from collections import namedtuple
 
 from openmmml import MLPotential
 from ase.io import read, write
-from openmm.app.topology import Topology
+from openmm.app.topology import Topology 
 from openmm.app.element import Element
 
 import json
@@ -67,6 +67,7 @@ class ISetup(ABC):
             # self.press_unit = getattr(unit, self.config['UNITS']['press_unit'])
         self.temp_unit = getattr(unit, self.config['UNITS']['temp_unit'])
         self.time_unit = getattr(unit, self.config['UNITS']['time_unit'])
+        logger.debug(f"Using units: size={self.size_unit}, temp={self.temp_unit}, time={self.time_unit}")
 
 
         # Simulation settings from config
@@ -74,6 +75,7 @@ class ISetup(ABC):
         self.temperature = integrator_config['temperature'] * self.temp_unit
         self.dt = integrator_config["dt"] * self.time_unit
         self.friction = integrator_config["friction"] / self.time_unit
+        logger.debug(f"Integrator settings: temperature={self.temperature}, dt={self.dt}, friction={self.friction}")
         self.constant_variable = integrator_config["constant_variable"]
         if self.constant_variable == "P":
             self.barostat_frequency = integrator_config["barostat_frequency"]
@@ -230,7 +232,9 @@ class Sampler(ISampler):
         self.directory = Path(directory)
         self.config_file = setup_class.config
         self.n_steps = self.config_file.get("tot_mc_steps", 100)
-        self.step = self.config_file.get("save_every", 20)
+        self.step = self.config_file.get("save_every", None)
+        if self.step is None:
+            logger.warning(f"save_every not specified in config, you are doing only one save at the end of the {self.n_steps} TPS run.")
         self.traj_path = Path(self.config_file.get("init_path", "tps.xyz"))
         self.output_path = Path(output_path) if output_path else self.directory
         if os.path.exists(self.output_path) is False:
@@ -270,29 +274,29 @@ class Sampler(ISampler):
     def run(self):
         # config_path = self.directory / self.config_file
 
-        # --- HPC prepare-only mode ---
-        if self.prepare_only:
-            # create folders
-            base_path = Path.cwd() if self.absolute_paths else Path(".")
-            os.makedirs(self.output_path, exist_ok=True)
-            # if self.final_traj_storage_path:
-            #     os.makedirs(self.final_traj_storage_path, exist_ok=True)
+        # # --- HPC prepare-only mode ---
+        # if self.prepare_only:
+        #     # create folders
+        #     base_path = Path.cwd() if self.absolute_paths else Path(".")
+        #     os.makedirs(self.output_path, exist_ok=True)
+        #     # if self.final_traj_storage_path:
+        #     #     os.makedirs(self.final_traj_storage_path, exist_ok=True)
 
-            # save pickled sampler
-            if self.pickle_path:
-                with open(self.pickle_path, "wb") as f:
-                    pickle.dump(self, f)
-                logger.debug(f"[Sampler pickled to: {self.pickle_path}]")
+        #     # save pickled sampler
+        #     if self.pickle_path:
+        #         with open(self.pickle_path, "wb") as f:
+        #             pickle.dump(self, f)
+        #         logger.debug(f"[Sampler pickled to: {self.pickle_path}]")
 
-            # print HPC command
-            cmd = (
-                f"python {Path(__file__).name} "
-                f"--run_pickled {self.pickle_path}"
-            )
-            logger.debug(f"[Prepared workflow folder: {self.output_path}]")
-            logger.debug("\nRun the following on HPC to execute the full TPS:\n")
-            logger.debug(cmd)
-            return cmd
+        #     # print HPC command
+        #     cmd = (
+        #         f"python {Path(__file__).name} "
+        #         f"--run_pickled {self.pickle_path}"
+        #     )
+        #     logger.debug(f"[Prepared workflow folder: {self.output_path}]")
+        #     logger.debug("\nRun the following on HPC to execute the full TPS:\n")
+        #     logger.debug(cmd)
+        #     return cmd
 
         # --- If running from pickled object or normally ---
         # check if setup/engine already exists
@@ -337,6 +341,9 @@ class Sampler(ISampler):
         # create storage
         ops_storage_path = self.output_path / (self.ops_storage_path or f"d_tps_storage_{setup.system_name}.db")
         print(f"set {ops_storage_path}...")
+        print(f" Time step {setup.md_engine.simulation.integrator.getStepSize()}")
+        print(f" Time step {setup.integrator.getStepSize()}")
+
 
         # --- build TPS/TIS sampler ---
         selector = paths.shooting.UniformSelector()
@@ -347,9 +354,9 @@ class Sampler(ISampler):
         )
 
         # generic network setup placeholder (replace later for TIS)
-        print("Defining CV and states...")
+        logger.debug("Defining CV and states...")
         cv = CV(self.config_file, self.traj_path)
-        print("Creating TPS network...","states:",cv.states)
+        logger.debug(f"Creating TPS network with states: {cv.states}")
         network = paths.TPSNetwork.from_states_all_to_all(cv.states)
 
         move_scheme = paths.MoveScheme(network=network)
@@ -364,18 +371,42 @@ class Sampler(ISampler):
         # storage
         print("Creating storage...")
         storage = Storage(ops_storage_path, "w")
-        for obj in [setup.template, setup.md_engine, setup.topology, initial_conditions, move_scheme]:
-            storage.save(obj)
+        # for obj in [setup.template, setup.md_engine, setup.topology, initial_conditions, move_scheme]:
+        #     storage.save(obj)
+        # for obj in [setup.template, setup.topology, initial_conditions, move_scheme]:
+        #     storage.save(obj)
 
         sampler = paths.PathSampling(storage, move_scheme, initial_conditions).named("sampler")
 
-        step = self.step
-        os.makedirs(self.final_traj_storage_path, exist_ok=True)
-        for i in range(0, self.n_steps + 1, step):
-            sampler.run(step)
-            for j, s in enumerate(storage.steps):
-                if s.change.accepted:
-                    s.active[0].trajectory.to_mdtraj().save(f"{self.final_traj_storage_path}/accepted_{j}.xyz")
+        save_rejected = self.config_file.get("save_rejected", False)
+
+        print(f" Time step {setup.md_engine.simulation.integrator.getStepSize()} \n \n \n \n")
+        if self.step is not None:
+            step = self.step
+            os.makedirs(self.final_traj_storage_path, exist_ok=True)
+            for i in range(0, self.n_steps + 1, step):
+                logger.debug(f"Running TPS steps {i} to {i + step}...")
+                sampler.run(step)
+                for (j, s), store in zip(enumerate(storage.steps), storage.trajectories):
+                    if j <=i:
+                        continue
+                        
+                    if s.change.accepted:
+                        logger.debug(f"  Saving accepted trajectory for step {j}...")
+                        storage.trajectories[j].to_mdtraj().save(f"{self.final_traj_storage_path}/accepted_{j}.xyz")
+                    else:
+                        if save_rejected:
+                            logger.debug(f"  Saving rejected trajectory for step {j}...")
+                            storage.trajectories[j].to_mdtraj().save(f"{self.final_traj_storage_path}/rejected_{j}.xyz")
+            logger.debug("Saving initial Path.")
+        else:
+            logger.debug(f"Running full TPS for {self.n_steps} steps...")
+            sampler.run(self.n_steps)
+            logger.debug("Saving initial Path.")
+        try:
+            storage.steps[0].active[0].trajectory.to_mdtraj().save(f"{self.final_traj_storage_path}/accepted_0.xyz")
+        except Exception as e:
+            logger.error(f"Failed to save initial path: {e}")
 
         # final traj
         if self.save_final_traj:
@@ -384,7 +415,43 @@ class Sampler(ISampler):
             final_storage.save(storage.steps[-1].active[0].trajectory)
             final_storage.close()
         storage.close()
-    
+
+    def save_from_storage(self, storage_path, out_folder):
+        """Extract accepted and rejected trajectories from storage."""
+        os.makedirs(out_folder, exist_ok=True)
+        # make an empty engine to use for conversion
+        setup = self.setup_class
+        paths.PathMover.engine = setup.md_engine
+        logger.debug(f"Loading storage from {storage_path}...")
+        storage = Storage(storage_path, "r")
+        storage.engine = None
+        logger.debug(f"Saving trajectories to {out_folder}...")
+        save_rejected = self.config_file.get("save_rejected", False)
+
+        # reomve engine from storage 
+        # storage.engine = None
+        # steps = storage.steps
+        # trajs = storage.trajectories
+        end = len(storage.steps)
+        i = end
+        for s,traj  in zip(storage.steps[::-1],storage.trajectories[::-1]):
+            if Path(f"{self.final_traj_storage_path}/accepted_{i}.xyz").exists() or Path(f"{self.final_traj_storage_path}/rejected_{i}.xyz").exists():
+                logger.debug(f"  Trajectory for step {i} already exists, skipping...")
+                i -= 1
+                break
+            if s.change.accepted:
+                logger.debug(f"  Accepted trajectory for step {i}...")
+                traj.to_mdtraj().save(f"{self.final_traj_storage_path}/accepted_{i}.xyz")
+                logger.debug(f"Saved accepted trajectory for step {i}.")
+            else:
+                logger.debug(f" Rejected trajectory for step {i}...")
+                if save_rejected:
+                    traj.to_mdtraj().save(f"{self.final_traj_storage_path}/rejected_{i}.xyz")
+                    logger.debug(f"Saved trajectory for step {i}.")     
+            i -= 1
+        storage.close()
+        logger.debug("All trajectories saved.")
+            
     @staticmethod
     def path_extension(traj, n_steps, engine,direction=["forward","backward"]):
         """Extend a trajectory by n_steps using the given engine."""
@@ -404,28 +471,29 @@ class TPS_setup(ISetup):
 import argparse
 import pickle
 
-parser = argparse.ArgumentParser()
-parser.add_argument("--run_pickled", type=str, help="Path to pickled Sampler object to run")
-parser.add_argument("--prepare_only", action="store_true", help="Only prepare folders and print HPC command")
-parser.add_argument("--absolute_paths", action="store_true", help="Use absolute paths in HPC command")
-args, _ = parser.parse_known_args()
 
-if args.run_pickled:
-    # Load the pickled sampler
-    with open(args.run_pickled, "rb") as f:
-        sampler = pickle.load(f)
-    sampler.prepare_only = False
-    sampler.absolute_paths = False  # HPC run uses the paths in the pickle
-    sampler.run()
 
 
 if __name__ == "__main__":
     # Example usage
     # load json config
     
+    #take command line args for sampler run or read from storage and the json file name
+    
+    parser = argparse.ArgumentParser()
+    # parser.add_argument("--run_pickled", type=str, help="Path to pickled Sampler object to run")
+    # parser.add_argument("--prepare_only", action="store_true", help="Only prepare folders and print HPC command")
+    # parser.add_argument("--absolute_paths", action="store_true", help="Use absolute paths in HPC command")
+    # parser.add_argument("--db_path", type=str, help="Path to save pickled Sampler object")
+    # argument for load from db or run sampler
+    # parser.add_argument("--load_from_db", action="store_true", help="Load sampler from database instead of running",default=False)
+    parser.add_argument("--start_type", type=str, choices=["new","from_db","continue"], default="new", help="Start a new TPS run, load from database, or extend and continue from saved trajectories")
+    args, _ = parser.parse_known_args()
 
-    with open("tps.json", "r") as f:
-        config = json.load(f)
+
+
+    # with open("tps.json", "r") as f:
+    #     config = json.load(f)
     
     tps = TPS_setup("tps.json")
     sampler = Sampler(
@@ -437,137 +505,262 @@ if __name__ == "__main__":
         system_resource_directory=".",
         absolute_paths=True
     )
- 
-    # sampler.run()
+    
+    
+
+    if args.start_type == "from_db":
+        logger.debug(f"Saving trajectories from storage at {sampler.output_path / sampler.ops_storage_path} to {sampler.final_traj_storage_path}.")
+        sampler.save_from_storage(sampler.output_path / sampler.ops_storage_path, sampler.final_traj_storage_path)
+    elif args.start_type == "continue":
+        logger.debug(f"Continuing TPS run by extending trajectories from {sampler.final_traj_storage_path}.")
+    elif args.start_type == "new":
+        logger.debug("Starting new TPS run.")
+        sampler.run()
+    else:
+        raise ValueError("Invalid start_type argument.")
+
 
     # Extend the tps paths
     logger.debug("Extending TPS trajectories...")
     import ase.units as units
     nsteps = sampler.config_file.get("extend_steps", None)
-    if nsteps:
-        timestep = sampler.config_file.get("Integrator_settings")["dt"]
-        temp = sampler.config_file.get("Integrator_settings")["temperature"]
-        friction = sampler.config_file.get("Integrator_settings")["friction"]
 
-        logger.debug(f"Using device: {torch.device}")
-        #check if multiple models are provided
+    timestep = sampler.config_file.get("Integrator_settings")["dt"]*1000 #ps to fs
+    temp = sampler.config_file.get("Integrator_settings")["temperature"]
+    friction = sampler.config_file.get("Integrator_settings")["friction"]/1000 # 1/ps to 1/fs
 
-        from mace.calculators import MACECalculator
-        mace_model_paths = sampler.config_file.get("mace_model_path")
-        if isinstance(mace_model_paths, list):
-            # committee_models = []
-            committee_calcs = [MACECalculator(model_paths=[m], device=sampler.config_file.get("platform_name", "cuda").lower()) for m in mace_model_paths]
+    logger.debug(f"Using device: {torch.device}")
+    #check if multiple models are provided
 
-            logger.debug(f"Using committee of {len(committee_calcs)} models for extension.")
-        else:
-            raise ValueError("mace_model_path should be a list of model paths for committee evaluation.")
+    from mace.calculators import MACECalculator
+    mace_model_paths = sampler.config_file.get("mace_model_path")
+    if isinstance(mace_model_paths, list):
+        # committee_models = []
+        committee_calcs = [MACECalculator(model_paths=[m], device=sampler.config_file.get("platform_name", "cuda").lower()) for m in mace_model_paths]
 
-        folder = Path(sampler.final_traj_storage_path).resolve()
-        traj_list = [f for f in os.listdir(folder)
-                    if f.endswith(".xyz") and not f.startswith("._") and f != "accepted_0.xyz"]
-        traj_list = [folder / f for f in traj_list]
-        logger.info(f"Found {len(traj_list)} trajectories in {folder}.")
+        logger.debug(f"Using committee of {len(committee_calcs)} models for extension.")
+    else:
+        raise ValueError("mace_model_path should be a list of model paths for committee evaluation.")
 
-        from mlp import MACE_MLP
-        evaluate_committee = MACE_MLP.evaluate_committee
-        cell = read(Path(sampler.config_file.get("top_file","top.pdb")).resolve()).get_cell() 
-        # make extend folder
-        # os.makedirs(folder/"extend", exist_ok=True)
-        extend_folder =     folder/"extend"
-        os.makedirs(extend_folder, exist_ok=True)
+    folder = Path(sampler.final_traj_storage_path).resolve()
+    traj_list = [f for f in os.listdir(folder)
+                if f.endswith(".xyz") and not f.startswith("._")]
+    traj_list = [folder / f for f in traj_list]
 
-        from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
-        from ase.md.langevin import Langevin
+    #sort traj list
+    traj_list = sorted(traj_list, key=lambda x: int(x.stem.split("_")[-1].split(".")[0]))
 
+    logger.info(f"Found {len(traj_list)} trajectories in {folder}.")
 
-        for traj_file in traj_list:
+    from mlp import MACE_MLP
+    evaluate_committee = MACE_MLP.evaluate_committee
+    cell = read(Path(sampler.config_file.get("top_file","top.pdb")).resolve()).get_cell() 
+    # make extend folder
+    # os.makedirs(folder/"extend", exist_ok=True)
+    extend_folder =     folder/"extend"
+    os.makedirs(extend_folder, exist_ok=True)
 
-            logger.info(f"Processing {traj_file}")
-            base_name = traj_file.name.replace(".xyz", "")
-
-            # --- read only first and last frames efficiently ---
-            logger.info(f"  Reading trajectory.. {traj_file}")
-            orig_traj = read(f"{traj_file}", index=":")
-            atoms_first = orig_traj[0].copy()
-            atoms_last = orig_traj[-1].copy()
-
-            frames = []
-            for i, atoms in enumerate(orig_traj):
-                atoms = atoms.copy()
-                atoms.cell = cell
-                # atoms.center()
-                atoms.set_pbc((True, True, True))
-                atoms.calc = committee_calcs[0]
-                # if i % 100 == 0:
-                evaluate_committee(atoms,committee_calcs=committee_calcs)
-                frames.append(atoms.copy())
-                logger.info(f"    Frame {i}/{len(orig_traj)} processed")
-
-            out_file = f"{base_name}.xyz"
-            write(extend_folder/out_file, frames)
-            logger.info(f"  Saved full trajectory with committee stats → {out_file}")
-            frames.clear()
-
-            for direction, atoms in zip(["backward", "forward"], [atoms_first, atoms_last]):
-                logger.info(f"  Running {direction} MD")
-
-                atoms.cell = cell
-                # atoms.center()
-                atoms.set_pbc((True, True, True))
-                atoms.calc = committee_calcs[0]
-
-                # initialize random velocities
-                MaxwellBoltzmannDistribution(atoms, temperature_K=temp)
-                if direction == "backward":
-                    atoms.set_velocities(-atoms.get_velocities())
-
-                out_file = f"{base_name}_{direction}.xyz"
-                if os.path.exists(extend_folder/out_file):
-                    os.remove(extend_folder/out_file)
-
-                frames = []  # buffer
-
-                dyn = Langevin(atoms, timestep, temperature_K=temp, friction=friction)
-                def buffer_frame():
-                    logger.info(f"    Step {dyn.nsteps}/{nsteps} ")
-                    # c_time = time.time()
-                    # logger.info(f"Time per frame {c_time - start:.1f}s")
-                    evaluate_committee(atoms,committee_calcs=committee_calcs)
-                    frames.append(atoms.copy())
-                    
-                # def write_frame():
-                    # evaluate_committee(atoms)
-                    # atoms.write(out_file, append=True, write_results=False)
-
-                dyn.attach(buffer_frame, interval=1)
-
-                start = time.time()
-                dyn.run(nsteps)
-                logger.info(f"    Runtime {direction}: {time.time() - start:.1f}s")
-                for atoms in frames:
-                    # atoms.arrays['forces'] = atoms.get_forces()
-                    if 'momenta' in atoms.arrays:
-                        del atoms.arrays['momenta']
-
-                # write once at end
-                write(extend_folder/out_file, frames)
-                frames.clear()
-
-                logger.info(f"    Saved → {out_file}")
-                # --- end of MD ---
+    from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
+    from ase.md.langevin import Langevin
 
 
-            # --- merge trajectories ---
-            logger.info("  Merging extended trajectory...")
-            backward = read(extend_folder/f"{base_name}_backward.xyz", index=":")
-            forward = read(extend_folder/f"{base_name}_forward.xyz", index=":")
-            backward = backward[::-1]  # reverse time order
+    for traj_file in traj_list:
 
-            orig_traj = read(extend_folder/f"{base_name}.xyz", index=":")
 
-            # orig_traj = read(f"{folder}/{traj}", index=":")
-            extended = backward + orig_traj + forward
-            out_name = f"{base_name}_extended.xyz"
-            write(extend_folder/out_name, extended)
-            logger.info(f"  Saved → {out_name}\n")
-            
+
+        logger.info(f"Processing {traj_file}")
+        base_name = traj_file.name.replace(".xyz", "")
+
+        if os.path.exists(extend_folder/f"{base_name}_extended.xyz"):
+            logger.info(f"  Extended trajectory already exists, skipping...")
+            continue
+
+        # --- read only first and last frames efficiently ---
+        logger.info(f"  Reading trajectory.. {traj_file}")
+        orig_traj = read(f"{traj_file}", index=":")
+        atoms_first = orig_traj[0].copy()
+        atoms_last = orig_traj[-1].copy()
+
+        frames = []
+        for i, atoms in enumerate(orig_traj):
+            atoms = atoms.copy()
+            atoms.cell = cell
+            # atoms.center()
+            atoms.set_pbc((True, True, True))
+            atoms.calc = committee_calcs[0]
+            # if i % 100 == 0:
+            evaluate_committee(atoms,committee_calcs=committee_calcs)
+            frames.append(atoms.copy())
+            # logger.info(f"    Frame {i}/{len(orig_traj)} processed")
+
+        out_file = f"{base_name}.xyz"
+        write(extend_folder/out_file, frames)
+        logger.info(f"  Saved full trajectory with committee stats → {out_file}")
+        frames.clear()
+        if "accepted" in base_name:
+            if nsteps:
+                # --- extend both ends ---
+                for direction, atoms in zip(["backward", "forward"], [atoms_first, atoms_last]):
+                    logger.info(f"  Running {direction} MD")
+
+                    atoms.cell = cell
+                    # atoms.center()
+                    atoms.set_pbc((True, True, True))
+                    atoms.calc = committee_calcs[0]
+
+                    # initialize random velocities
+                    MaxwellBoltzmannDistribution(atoms, temperature_K=temp)
+                    if direction == "backward":
+                        atoms.set_velocities(-atoms.get_velocities())
+
+                    out_file = f"{base_name}_{direction}.xyz"
+                    if os.path.exists(extend_folder/out_file):
+                        os.remove(extend_folder/out_file)
+
+                    frames = []  # buffer
+
+                    dyn = Langevin(atoms, timestep * units.fs, temperature_K=temp, friction=friction)
+                    def buffer_frame():
+                        logger.info(f"    Step {dyn.nsteps}/{nsteps} ")
+                        # c_time = time.time()
+                        # logger.info(f"Time per frame {c_time - start:.1f}s")
+                        evaluate_committee(atoms,committee_calcs=committee_calcs)
+                        frames.append(atoms.copy())
+                        
+                    # def write_frame():
+                        # evaluate_committee(atoms)
+                        # atoms.write(out_file, append=True, write_results=False)
+
+                    dyn.attach(buffer_frame, interval=1)
+
+                    start = time.time()
+                    dyn.run(nsteps)
+                    logger.info(f"    Runtime {direction}: {time.time() - start:.1f}s")
+                    for atoms in frames:
+                        # atoms.arrays['forces'] = atoms.get_forces()
+                        if 'momenta' in atoms.arrays:
+                            del atoms.arrays['momenta']
+
+                    # write once at end
+                    write(extend_folder/out_file, frames)
+                    frames.clear()
+
+                    logger.info(f"    Saved → {out_file}")
+                    # --- end of MD ---
+
+
+                # --- merge trajectories ---
+                logger.info("  Merging extended trajectory...")
+                backward = read(extend_folder/f"{base_name}_backward.xyz", index=":")
+                forward = read(extend_folder/f"{base_name}_forward.xyz", index=":")
+                backward = backward[::-1]  # reverse time order
+
+                orig_traj = read(extend_folder/f"{base_name}.xyz", index=":")
+
+                # orig_traj = read(f"{folder}/{traj}", index=":")
+                extended = backward + orig_traj + forward
+                out_name = f"{base_name}_extended.xyz"
+                write(extend_folder/out_name, extended)
+                logger.info(f"  Saved → {out_name}\n")
+            else:
+                # just copy original to extended
+                out_name = f"{base_name}_extended.xyz"
+                orig_traj = read(extend_folder/f"{base_name}.xyz", index=":")
+                write(extend_folder/out_name, orig_traj)
+                logger.info(f"  No extension requested, copied original to → {out_name}\n")
+
+
+
+    #combine all extended trajs into one
+    logger.info("Combining all extended trajectories into one...")
+    combined = []
+    extend_traj_list = [f for f in os.listdir(extend_folder)
+                if (f.endswith("_extended.xyz") or f.startswith("rejected")) and not f.startswith("._") ]
+    extend_traj_list = [extend_folder / f for f in extend_traj_list]
+    extend_traj_list = sorted(extend_traj_list, key=lambda x: int(x.stem.strip("_extended.xyz").split("_")[-1]))
+
+    for traj_file in extend_traj_list:
+        logger.info(f"  Reading {traj_file}")
+        traj = read(traj_file, index=":")
+        combined.extend(traj)
+    combined_out = sampler.output_path / "tps_all_extended.xyz"
+    write(combined_out, combined)
+    logger.info(f"Saved combined extended trajectory → {combined_out}")
+
+    from util.mlp_helper import process_frame
+    from ase.io import read, write
+    import numpy as np
+
+    # --- analyze extended traj for high-variance frames ---
+    logger.info("Analyzing extended trajectory for high-variance frames...")
+
+    cutoff = sampler.config_file.get("local_cutoff", 5.0)
+    carbon_indices = sampler.config_file.get("selection_indices")
+    num_select = sampler.config_file.get("num_select")
+
+    # new thresholds
+    e_thresh = sampler.config_file.get("e_var_max", 1000)
+    f_thresh = sampler.config_file.get("f_var_max", 100)
+
+    atoms_list = read(sampler.output_path / "tps_all_extended.xyz", index=":")
+
+    # compute metrics
+    metrics = []
+    for at in atoms_list:
+        e_var, f_var, local_mean, local_max = process_frame(at, carbon_indices, cutoff)
+        metrics.append((e_var, f_var, local_mean, local_max))
+    metrics = np.array(metrics)
+
+    logger.debug(f"metrics computed: {metrics}")
+
+    # --- apply thresholds ---
+    mask = (metrics[:, 0] <= e_thresh) & (metrics[:, 1] <= f_thresh)
+
+    metrics_filt = metrics[mask]
+    atoms_filt = [a for a, keep in zip(atoms_list, mask) if keep]
+
+    if len(metrics_filt) == 0:
+        logger.warning("No frames passed threshold filtering.")
+        metrics_filt = metrics
+        atoms_filt = atoms_list
+
+    # --- take worst num_select from each column ---
+    worst_idx = []
+    alpha = sampler.config_file.get("alpha", 0)
+
+    for col in range(metrics_filt.shape[1]):
+        vals = metrics_filt[:, col]
+
+        # rescale to 0–1 (keeps relative differences even if tiny)
+        vals_norm = (vals - vals.min()) / (vals.max() - vals.min() + 1e-12)
+
+        # mix
+        weights = alpha * vals_norm + (1 - alpha)
+
+        # probabilities
+        probs = weights / weights.sum()
+
+        topk = np.random.choice(len(vals), size=num_select, replace=False, p=probs)
+        worst_idx.append(topk)
+
+    # combine and dedupe
+    worst_idx = np.unique(np.concatenate(worst_idx))
+    worst_idx.sort()
+
+    # final selected frames
+    selected = [atoms_filt[i] for i in worst_idx]
+
+    #randomly select num_select frames if not enough to make sure its num_select
+    if len(selected) > num_select:
+        indices = np.arange(len(selected))
+        selected_indices = np.random.choice(indices, size=num_select, replace=False).tolist()
+        selected = [selected[i] for i in selected_indices]
+
+    output_path = sampler.output_path / "tps_selected_frames.xyz"
+    write(output_path, selected)
+
+
+
+        # write out
+
+    

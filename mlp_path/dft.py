@@ -224,6 +224,7 @@ class DFTFactory:
 
 # Register engines
 DFTFactory.register("cp2k", CP2KDFT)
+DFTFactory.register("vasp", None)  # Placeholder for VASPDFT class
 
 if __name__ == "__main__":
     # Example usage
@@ -232,8 +233,8 @@ if __name__ == "__main__":
         engine="cp2k",
         settings={"command": "mpirun -np 20 /home/ashiquel/software/cp2k-2024/cp2k_zen/cp2k-2024.1/exe/local/cp2k.popt"},
         input_files = ["cp2k.inp","force_eval.inp"],
-        reftraj=True,
-        run_mode="prepare",
+        # reftraj=True,
+        # run_mode="prepare",
         workdir="single_reftraj"
     )
     structures = ["coord.xyz","coord1.xyz"]  # Placeholder for actual structures
