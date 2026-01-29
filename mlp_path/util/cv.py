@@ -76,7 +76,7 @@ class CV:
             unbound[0]= unbound[0] & unbound[i+1]
 
         self.states = (bound[0],unbound[0])
-        
+
     @staticmethod
     def bondfunction(snapshot, group_A_atoms, group_B_atoms,group_C_atoms, group_D_atoms,coeff=-1):
         import numpy as np
@@ -110,7 +110,6 @@ class CV:
             A_com = np.mean(A_com, axis=0)
             B_com = np.mean(B_com, axis=0)
             ab = A_com - B_com
-            # Calculate the angle between the two vectors
             angle = np.linalg.norm(ab)
             return angle
 
@@ -176,5 +175,20 @@ class CV:
         # Calculate the angle between the two vectors
         angle = np.linalg.norm(ab)
         return angle
-
     
+    @staticmethod
+    def bond_plane_angle(snapshot, group_A_atoms, group_B_atoms,axis=2):
+        import numpy as np
+
+        A_com = snapshot.xyz[group_A_atoms, :]
+        B_com = snapshot.xyz[group_B_atoms, :]
+
+        # # make sure A_com and B_com are 2d arrays
+        A_com = np.atleast_2d(A_com)
+        B_com = np.atleast_2d(B_com)
+
+        A_com = np.mean(A_com, axis=0)
+        B_com = np.mean(B_com, axis=0)
+        ab = A_com - B_com
+        angle = np.degrees(np.arccos(ab[axis]/np.linalg.norm(ab)))-90
+        return angle
