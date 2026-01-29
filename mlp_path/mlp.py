@@ -216,7 +216,7 @@ class MACE_MLP(MLP):
     @staticmethod
     def run_md(model_path, md_params,plumed=None,type= "local"):
         from ase.io import read
-        from mace.calculators import MACECalculator
+        
         from ase import Atoms
         from ase.calculators.plumed import Plumed
         from ase import units
@@ -260,8 +260,13 @@ class MACE_MLP(MLP):
         # init_conf.cell = ([ 11.24800,9.7410,40])
         # init_conf.set_pbc((True, True, True))
         print(init_conf)
-
-        calculator = MACECalculator(model_paths= model_path, device='cuda')
+        #using one of the esen foundation models
+        if esen_foundational_model:
+            from fairchem.core import FAIRChemCalculator
+            calculator = FAIRChemCalculator.from_model_checkpoint(name_or_path=str(model_path), device="cuda")
+        else:
+            from mace.calculators import MACECalculator
+            calculator = MACECalculator(model_paths= model_path, device='cuda')
         # init_conf.set_calculator(calculator)
         # check if timestep 
         timestep = float(md_params.get("time_step",1.0))*units.fs  # default 1 fs
@@ -285,7 +290,8 @@ class MACE_MLP(MLP):
                                     kT=0.03)
         else:
             init_conf.calc = calculator
-
+        
+        from ase.md import MDLogger
         from ase.md.langevin import Langevin
         temperature = md_params.get("temperature", 330)  # default 300 K
         friction = md_params.get("friction", 5e-3)  # default 5e-3 1/fs
