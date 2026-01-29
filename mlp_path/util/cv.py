@@ -12,6 +12,8 @@ from .parser import read_config
 import mdtraj
 from loguru import logger
 
+
+
 class CV:
     def __init__(self,config,traj_path="p1.xyz"):
         logger.debug("Defining states and interfaces...")
