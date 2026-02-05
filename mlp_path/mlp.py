@@ -214,7 +214,7 @@ class MACE_MLP(MLP):
         else:
             raise RuntimeError("No model loaded.")
     @staticmethod
-    def run_md(model_path, md_params,plumed=None,type= "local"):
+    def run_md(model_path, md_params,plumed=None,type= "local", esen_foundational_model=False):
         from ase.io import read
         
         from ase import Atoms
@@ -300,11 +300,9 @@ class MACE_MLP(MLP):
         if thermostat == "Langevin":
             logger.debug(f"Using Langevin thermostat with friction {friction} 1/fs.")
             dyn = Langevin(init_conf, timestep, temperature_K=temperature, friction=friction,logfile='md_out.log')
-        elif thermostat == "NoseHoover":
-            from ase.md.npt import NPT
-            pressure = md_params.get("pressure", 101325)  # default 1 atm
-            logger.debug(f"Using Nose-Hoover thermostat with pressure {pressure} Pa.")
-            dyn = NPT(init_conf, timestep, temperature_K=temperature, externalstress=pressure, ttime=25*timestep, pfactor=25*timestep,logfile='md_out.log')
+        elif thermostat == "NoseHooverChain":
+            from ase.md.nose_hoover_chain import NoseHooverChainNVT
+            dyn = NoseHooverChainNVT(init_conf, timestep, temperature_K=temperature, tdamp=50* units.fs, tchain=4,logfile='md_out.log')
         elif thermostat == "Berendsen":
             from ase.md.berendsen import Berendsen
             tau = md_params.get("tau", 25*timestep)  # default 25*timestep
