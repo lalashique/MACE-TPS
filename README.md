@@ -1,6 +1,6 @@
 # MACE-TPS: Machine Learning-Enhanced Transition Path Sampling
 
-A comprehensive framework for efficient rare event sampling using machine learning potentials combined with transition path sampling (TPS). This project integrates MACE (Machine Learning Interatomic Potential) models with OpenPathSampling to explore complex molecular transitions.
+A comprehensive framework for efficient rare event sampling using machine learning potentials trained using transition path sampling (TPS). This project integrates MACE (Machine Learning Interatomic Potential) models with OpenPathSampling to explore complex molecular transitions.
 
 ## Overview
 
@@ -87,29 +87,7 @@ Utility modules:
 
 Simulations are configured using JSON files with the following structure:
 
-```json
-{
-  "tps": {
-    "initial_snapshot": "p1.xyz",
-    "engine": "openmm",
-    "sampling_steps": 1000,
-    "n_replicas": 10
-  },
-  "mlp": {
-    "model_path": "path/to/mace/model",
-    "committee_size": 3
-  },
-  "dft": {
-    "engine": "cp2k",
-    "input_template": "cp2k.inp"
-  },
-  "cv": {
-    "type": "distance",
-    "atom_pairs": [[0, 1]],
-    "thresholds": [2.0, 3.0]
-  }
-}
-```
+**TODO**
 
 ## Setup and Installation
 
