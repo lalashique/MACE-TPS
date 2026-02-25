@@ -96,7 +96,7 @@ class CV:
         return angle
 
     @staticmethod
-    def bond(snapshot, group_A_atoms, group_B_atoms,type=0):
+    def bond(snapshot, group_A_atoms, group_B_atoms,type=0,axis=-1): 
         import numpy as np
 
         A_com = snapshot.xyz[group_A_atoms, :]
@@ -110,19 +110,28 @@ class CV:
             A_com = np.mean(A_com, axis=0)
             B_com = np.mean(B_com, axis=0)
             ab = A_com - B_com
-            angle = np.linalg.norm(ab)
+            if axis >= 0:
+                angle = ab[axis]
+            else:
+                angle = np.linalg.norm(ab)
             return angle
 
         elif type==-1:
             A_com = np.reshape(A_com, ( -1, 3))
             B_com = np.reshape(B_com, ( -1, 3))
             dists = distance_array(A_com, B_com)
-            return np.min(dists)
+            if axis >= 0:
+                return np.min(dists[:, axis])
+            else:
+                return np.min(dists)
         elif type==1:
             A_com = np.reshape(A_com, ( -1, 3))
             B_com = np.reshape(B_com, ( -1, 3))
             dists = distance_array(A_com, B_com)
-            return np.max(dists)
+            if axis >= 0:
+                return np.max(dists[:, axis])
+            else:   
+                return np.max(dists)
         else:
             raise ValueError(f"Unknown bond type: {type}")
         
@@ -157,8 +166,9 @@ class CV:
         count = np.sum(np.round(dists,rounding) == value)
         return count
 
+    # ! TO BE DELETED : already implemented in bond function with axis=2
     @staticmethod
-    def atom_surface(snapshot, group_A_atoms, group_B_atoms):
+    def atom_surface(snapshot, group_A_atoms, group_B_atoms): 
         import numpy as np
 
         A_com = snapshot.xyz[group_A_atoms, :]
@@ -192,3 +202,44 @@ class CV:
         ab = A_com - B_com
         angle = np.degrees(np.arccos(ab[axis]/np.linalg.norm(ab)))-90
         return angle
+
+    @staticmethod
+    def distance_to_OH(snapshot,O_indices,H_indices, atom, bond_cutoff=1.3):
+        from MDAnalysis.lib.distances import capped_distance
+        import numpy as np
+
+        """
+        If 'atom' is the distance to be calculated from,
+        return distance to the other OH oxygen.
+        Otherwise return np.inf.
+        """
+
+        pairs, _ = capped_distance(
+            snapshot.xyz[0, O_indices, :],
+            snapshot.xyz[0, H_indices, :],
+            max_cutoff=bond_cutoff/10,
+            box=np.array([14.46, 14.46, 40,90,90,90]) # ! URGENT: Update to take from topology
+        )
+
+        if len(pairs) == 0:
+            return -1
+
+        O_indice_new, h_counts = np.unique(pairs[:, 0], return_counts=True)
+
+        hydroxide_mask = (h_counts == 1)
+        oh_group_indices = O_indice_new[hydroxide_mask]
+
+        if len(oh_group_indices) < 2:
+            return np.inf
+        
+        oh_oxygens_indices = O_indices[oh_group_indices]
+        oh_oxygens = snapshot.xyz[0, oh_oxygens_indices, :]
+
+        # Get the other OH oxygen
+        other_O = oh_oxygens[oh_oxygens_indices != atom]
+
+        if len(other_O) == 0:
+            return np.inf
+
+        dist = np.linalg.norm(snapshot.xyz[0][atom] - other_O[0])
+        return dist
