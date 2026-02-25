@@ -222,7 +222,7 @@ class CV:
         )
 
         if len(pairs) == 0:
-            return -1
+            return np.inf
 
         O_indice_new, h_counts = np.unique(pairs[:, 0], return_counts=True)
 
