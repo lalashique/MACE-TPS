@@ -1,143 +1,211 @@
+"""
+util/traj_util.py — Trajectory manipulation and frame-selection utilities.
+
+Provides:
+- ``train_test_split``  — shuffle and split an XYZ dataset.
+- ``select_frames``     — pick high-uncertainty frames from a trajectory.
+- ``split_times``       — split a trajectory into N roughly equal segments.
+"""
+
+from __future__ import annotations
+
 import os
 from pathlib import Path
+
 import numpy as np
-from ase.io import read, write  
+from ase.io import read, write
 from loguru import logger
 
-def train_test_split(xyz, test_fraction=0.25):
-    """Splits data into training and testing sets."""
 
-    try:
-        # save the file
-        atoms_list = read(os.path.join(xyz),':')
-        # Shuffle and split
-        total = len(atoms_list)
-        indices = np.arange(total)
-        np.random.shuffle(indices)
-        train_cut = int((1 - test_fraction) * total)
-        train_indices = indices[:train_cut]
-        test_indices = indices[train_cut:]
+# ---------------------------------------------------------------------------
+# Train / test split
+# ---------------------------------------------------------------------------
 
-        train_atoms = [atoms_list[i] for i in train_indices]
-        test_atoms = [atoms_list[i] for i in test_indices]
-        #save to folder containing original file
-        folder = os.path.dirname(xyz)
-        write(os.path.join(folder, "train.xyz"), train_atoms)
-        write(os.path.join(folder, "test.xyz"), test_atoms)
-        # print(f"Saved {len(train_atoms)} train and {len(test_atoms)} test samples.")
+def train_test_split(
+    xyz: str | Path,
+    test_fraction: float = 0.25,
+    seed: int | None = None,
+) -> tuple[list, list]:
+    """
+    Shuffle and split an extended XYZ file into train and test sets.
 
-    except FileNotFoundError:
-        print(f"File not found.")
-        # continue
-    except AssertionError:
-        print(f"Assertion error.")
-        # continue%
+    Writes ``train.xyz`` and ``test.xyz`` into the same directory as ``xyz``.
 
-from ase.io import read, write
-import numpy as np
+    Parameters
+    ----------
+    xyz : str or Path
+        Path to the source XYZ file.
+    test_fraction : float
+        Fraction of frames to reserve for the test set (default 0.25).
+    seed : int, optional
+        Random seed for reproducibility.
+
+    Returns
+    -------
+    train_atoms, test_atoms : list[ase.Atoms]
+    """
+    xyz = Path(xyz)
+    if not xyz.exists():
+        raise FileNotFoundError(f"XYZ file not found: {xyz}")
+
+    atoms_list = read(str(xyz), ":")
+    total      = len(atoms_list)
+    rng        = np.random.default_rng(seed)
+    indices    = rng.permutation(total)
+
+    cut         = int((1 - test_fraction) * total)
+    train_atoms = [atoms_list[i] for i in indices[:cut]]
+    test_atoms  = [atoms_list[i] for i in indices[cut:]]
+
+    folder = xyz.parent
+    write(str(folder / "train.xyz"), train_atoms)
+    write(str(folder / "test.xyz"),  test_atoms)
+    logger.info(f"Split {total} frames → {len(train_atoms)} train, {len(test_atoms)} test.")
+    return train_atoms, test_atoms
+
+
+# ---------------------------------------------------------------------------
+# Frame selection
+# ---------------------------------------------------------------------------
 
 def select_frames(
-    xyz_path,
-    tps_params,
-    out_file="selected.xyz",
-):
-    frames = read(xyz_path, index=":")
-    n = len(frames)
+    xyz_path: str | Path,
+    tps_params: dict,
+    out_file: str | Path = "selected.xyz",
+) -> list:
+    """
+    Select high-uncertainty frames from a committee-evaluated trajectory.
+
+    Selection criteria (all taken from ``tps_params``):
+
+    - Worst ``num_select`` frames by global energy variance.
+    - Worst ``num_select`` frames by global force variance.
+    - Worst ``num_select`` frames by local mean/max per-atom force variance
+      within windows centred on each index in ``selection_indices``.
+
+    The final pool is deduplicated and randomly down-sampled to ``num_select``
+    if larger.
+
+    Parameters
+    ----------
+    xyz_path : str or Path
+        Extended XYZ file with committee statistics in ``atoms.info`` /
+        ``atoms.arrays``.
+    tps_params : dict
+        Must contain:
+
+        - ``"num_select"``        (int) — target number of frames to output.
+        - ``"selection_indices"`` (list[int]) — key-atom indices for local stats.
+        - ``"local_range"``       (int) — half-width of the frame window.
+
+    out_file : str or Path
+        Output XYZ file path.
+
+    Returns
+    -------
+    list[ase.Atoms]
+        Selected frames (also written to ``out_file``).
+    """
+    xyz_path = Path(xyz_path)
+    out_file = Path(out_file)
+
+    frames = read(str(xyz_path), ":")
+    n      = len(frames)
 
     selection_indices = tps_params.get("selection_indices")
-    local_range = tps_params.get("local_range")
-    num_select = tps_params.get("num_select")
+    local_range       = tps_params.get("local_range", 50)
+    num_select        = tps_params.get("num_select", 200)
 
-    # extract metrics
+    # Extract metrics
     try:
-        energy_var = np.array([f.info["energy_variance"] for f in frames])
-        force_var  = np.array([f.info["force_variance"] for f in frames])
+        energy_var = np.array([f.info["energy_variance"]    for f in frames])
+        force_var  = np.array([f.info["force_variance"]     for f in frames])
         fpa        = np.array([f.arrays["force_var_per_atom"] for f in frames])
-    except KeyError as e:
-        raise(f"KeyError: {e}. Ensure that the frames have the required info and arrays.")
+    except KeyError as exc:
+        raise KeyError(
+            f"Required key {exc} missing from trajectory frames. "
+            "Ensure committee evaluation was run before frame selection."
+        ) from exc
 
-    fpa_mean   = fpa.mean(axis=1)
-    fpa_max    = fpa.max(axis=1)
+    fpa_mean = fpa.mean(axis=1)
+    fpa_max  = fpa.max(axis=1)
 
-    collected = []
+    collected: list[np.ndarray] = []
 
-    # 1. energy variance (global)
-    worst_energy = np.argsort(energy_var)[-num_select:]
-    collected.append(worst_energy)
+    # Global energy variance
+    collected.append(np.argsort(energy_var)[-num_select:])
+    # Global force variance
+    collected.append(np.argsort(force_var)[-num_select:])
 
-    # 2. force variance (global)
-    worst_force = np.argsort(force_var)[-num_select:]
-    collected.append(worst_force)
+    # Local windows around selection_indices
+    if selection_indices:
+        for metric in (fpa_mean, fpa_max):
+            picks = []
+            for idx in selection_indices:
+                lo = max(idx - local_range, 0)
+                hi = min(idx + local_range + 1, n)
+                window = np.arange(lo, hi)
+                worst  = window[np.argsort(metric[window])[-num_select:]]
+                picks.append(worst)
+            collected.append(np.unique(np.concatenate(picks)))
 
-    # 3. local mean fpa (local windows)
-    if selection_indices is not None:
-        mean_picks = []
-        for idx in selection_indices:
-            lo = max(idx - local_range, 0)
-            hi = min(idx + local_range + 1, n)
-            window_ids = np.arange(lo, hi)
-
-            vals = fpa_mean[window_ids]
-            worst_local = window_ids[np.argsort(vals)[-num_select:]]
-            mean_picks.append(worst_local)
-
-        mean_picks = np.unique(np.concatenate(mean_picks))
-        collected.append(mean_picks)
-
-    # 4. local max fpa (local windows)
-    if selection_indices is not None:
-        max_picks = []
-        for idx in selection_indices:
-            lo = max(idx - local_range, 0)
-            hi = min(idx + local_range + 1, n)
-            window_ids = np.arange(lo, hi)
-
-            vals = fpa_max[window_ids]
-            worst_local = window_ids[np.argsort(vals)[-num_select:]]
-            max_picks.append(worst_local)
-
-        max_picks = np.unique(np.concatenate(max_picks))
-        collected.append(max_picks)
-
-    # merge all
     final_ids = np.unique(np.concatenate(collected))
 
-    # rank by severity
-    severity = (
-        energy_var[final_ids] +
-        force_var[final_ids] +
-        fpa_mean[final_ids] +
-        fpa_max[final_ids]
-    )
+    # Rank by combined severity and down-sample if needed
+    severity = energy_var[final_ids] + force_var[final_ids] + fpa_mean[final_ids] + fpa_max[final_ids]
+    if len(final_ids) > num_select:
+        top_k     = np.argsort(severity)[-num_select:]
+        final_ids = final_ids[top_k]
 
-    # keep worst 2000
-    k = num_select
-    if len(final_ids) > k:
-        final_ids = final_ids[np.argsort(severity)[-k:]]
+    selected = [frames[i] for i in final_ids]
+    out_file.parent.mkdir(parents=True, exist_ok=True)
+    write(str(out_file), selected)
+    logger.info(f"Selected {len(selected)} frames → {out_file}")
+    return selected
 
-    # write
-    write(out_file, [frames[i] for i in final_ids])
-    print(f"Wrote {len(final_ids)} frames → {out_file}")
 
-def split_times(xyz, split=4):
-    """Splits a trajectory file into multiple segments after shuffling."""
-    try:
-        # read the file
-        atoms_list = read(xyz,':')
-        np.random.shuffle(atoms_list)
-        total = len(atoms_list)
-        segment_size = total // split
-        base, ext = os.path.splitext(xyz)
+# ---------------------------------------------------------------------------
+# Trajectory splitting
+# ---------------------------------------------------------------------------
 
-        for i in range(split):
-            start = i * segment_size
-            end = (i + 1) * segment_size if i < split - 1 else total
-            segment_atoms = atoms_list[start:end]
-            out_file = f"{base}_part{i+1}{ext}"
-            write(out_file, segment_atoms)
-            logger.info(f"Saved segment {i+1} with {len(segment_atoms)} frames to {out_file}.")
+def split_times(xyz: str | Path, split: int = 4, seed: int | None = None) -> list[Path]:
+    """
+    Shuffle a trajectory and split it into ``split`` roughly equal segments.
 
-    except FileNotFoundError:
-        print(f"File not found: {xyz}")
-    except AssertionError:
-        print(f"Assertion error while processing the file: {xyz}")
+    Writes ``<stem>_part1.xyz``, ``<stem>_part2.xyz``, … alongside the source file.
+
+    Parameters
+    ----------
+    xyz : str or Path
+    split : int
+        Number of segments.
+    seed : int, optional
+        Random seed.
+
+    Returns
+    -------
+    list[Path]
+        Paths to the written segment files.
+    """
+    xyz = Path(xyz)
+    if not xyz.exists():
+        raise FileNotFoundError(f"XYZ file not found: {xyz}")
+
+    atoms_list = read(str(xyz), ":")
+    rng        = np.random.default_rng(seed)
+    rng.shuffle(atoms_list)
+
+    total  = len(atoms_list)
+    size   = total // split
+    paths_out: list[Path] = []
+
+    for i in range(split):
+        start   = i * size
+        end     = (i + 1) * size if i < split - 1 else total
+        segment = atoms_list[start:end]
+        out     = xyz.parent / f"{xyz.stem}_part{i + 1}{xyz.suffix}"
+        write(str(out), segment)
+        paths_out.append(out)
+        logger.info(f"Segment {i + 1}/{split}: {len(segment)} frames → {out}")
+
+    return paths_out

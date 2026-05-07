@@ -1,0 +1,49 @@
+{
+    "_comment": "MLPath workflow configuration. Copy and edit for your system.",
+
+    "workdir": ".",
+    "max_generations": 5,
+    "top_file": "top.pdb",
+    "structures": [
+        "init/coord.xyz"
+    ],
+
+    "dft": {
+        "engine": "cp2k",
+        "input_files": ["cp2k.inp", "force_eval.inp"],
+        "settings": {
+            "command": "mpirun -np 20 /path/to/cp2k.popt"
+        },
+        "workdir": "single_reftraj",
+        "reftraj": true,
+        "run_mode": "prepare"
+    },
+
+    "mlp": {
+        "config_file": "mlp.yaml",
+        "E0s": {
+            "1":  -13.50896562,
+            "6":  -145.7376780,
+            "8":  -428.8933516,
+            "46": -3454.585309,
+            "78": -3262.604121
+        },
+        "seeds": [123, 234, 345],
+        "test_fraction": 0.25
+    },
+
+    "tps": {
+        "config_file": "tps.json",
+        "run_command": "cd {tps_dir} && python -m tps --start_type new"
+    },
+
+    "auto_confirm": {
+        "_comment": "Set to true to skip interactive prompts and proceed automatically.",
+        "remove_pause":          false,
+        "continue_generation":   false,
+        "run_smd":               false
+    },
+
+    "log_file":   "workflow_debug.log",
+    "state_file": "workflow_state.json"
+}

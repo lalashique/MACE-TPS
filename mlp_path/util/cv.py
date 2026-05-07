@@ -1,245 +1,317 @@
+"""
+util/cv.py — Collective variable (CV) definitions and state construction.
 
+The ``CV`` class reads a CV block from the JSON config, builds OPS
+``CoordinateFunctionCV`` objects, plots each CV along the initial trajectory,
+and constructs the bound/unbound metastable states used by the TPS/TIS sampler.
+
+Config schema (``"CV"`` block)
+-------------------------------
+    "CV": {
+        "my_cv_name": {
+            "type": "<method_name>",      # static method on CV class
+            "params": {
+                "group_A_atoms": "name CA",   # MDAnalysis selection string
+                ...
+            },
+            "bound":   [min, max],        # optional
+            "unbound": [min, max]         # optional
+        }
+    }
+
+Any string-valued parameter is interpreted as an MDAnalysis atom-selection
+expression and resolved to an array of integer atom indices.
+"""
+
+from __future__ import annotations
 
 import numpy as np
-
-import openpathsampling as paths
 import matplotlib.pyplot as plt
+import openpathsampling as paths
 import openpathsampling.engines.openmm as ops_openmm
-
-from MDAnalysis.lib.distances import distance_array
 import MDAnalysis as mda
-from .parser import read_config
+from MDAnalysis.lib.distances import distance_array
 import mdtraj
 from loguru import logger
 
+from .parser import read_config
+
+
 class CV:
-    def __init__(self,config,traj_path="p1.xyz"):
-        logger.debug("Defining states and interfaces...")
-        self.config = config #read_config(config_path)
-        cv_config = self.config.get('CV')
+    """
+    Build collective variables and metastable state volumes from a JSON config.
 
-        logger.debug(f"Reading top file")
-        mdt = mdtraj.load(self.config.get("top_file","top.pdb"))
-        traj = mdtraj.load(traj_path,top=mdt)
-        traj.unitcell_vectors = np.array(list(mdt.unitcell_vectors)*len(traj.xyz))
-        init_traj = ops_openmm.trajectory_from_mdtraj(traj,velocities=[np.zeros_like(frame) for frame in traj.xyz])
+    Parameters
+    ----------
+    config : dict
+        Parsed JSON config (already loaded).
+    traj_path : str
+        Path to the initial trajectory XYZ file.
 
-        cvs = []
+    Attributes
+    ----------
+    states : tuple[paths.Volume, paths.Volume]
+        ``(bound_state, unbound_state)`` as OPS ``CVDefinedVolume`` objects.
+    descriptor_transform : callable
+        Maps an OPS snapshot to a 1-D numpy array of CV values.
+    """
 
-        logger.debug(f"Defining CVs from config: {list(cv_config.keys())}")
+    def __init__(self, config: dict | str | Path, traj_path: str = "p1.xyz") -> None:
+        # Accept either an already-parsed dict or a path to a JSON config file,
+        # so that both old call-sites (CV(config_path, traj)) and new ones
+        # (CV(config_dict, traj)) continue to work.
+        if isinstance(config, (str, Path)):
+            config = read_config(config)
+        self.config = config
+        cv_config = config.get("CV", {})
 
-        for cv in cv_config.keys():
-            func = getattr(self,cv_config[cv]['type'])
+        logger.debug("Loading topology and initial trajectory for CV setup.")
+        top_file = config.get("top_file", "top.pdb")
+        mdt_top  = mdtraj.load(top_file)
+        traj     = mdtraj.load(traj_path, top=mdt_top)
+        traj.unitcell_vectors = np.array(list(mdt_top.unitcell_vectors) * len(traj.xyz))
+        init_traj = ops_openmm.trajectory_from_mdtraj(
+            traj, velocities=[np.zeros_like(f) for f in traj.xyz]
+        )
 
-            for param in cv_config[cv]['params']:
-                # print( type(cv_config[cv]['params'][param]) )
+        logger.debug(f"Defining CVs: {list(cv_config.keys())}")
+        cvs: list[paths.CoordinateFunctionCV] = []
 
-                if type(cv_config[cv]['params'][param]) is str:
-                    file = traj_path
-                    h = mda.Universe(file).select_atoms(cv_config[cv]['params'][param]).indices
-                    
-                    cv_config[cv]['params'][param] = h
-            # print(f"Defining CV: {cv} with params {cv_config[cv]['params']}")
-            cv_b= paths.CoordinateFunctionCV(name=cv,
-                f=func,
-                **cv_config[cv]['params']
+        for cv_name, cv_spec in cv_config.items():
+            func = getattr(self, cv_spec["type"])
+            params = self._resolve_atom_selections(cv_spec["params"], traj_path)
+
+            cv_obj = paths.CoordinateFunctionCV(
+                name=cv_name, f=func, **params
             ).with_diskcache()
-            cvs.append(cv_b)
-            fig, ax = plt.subplots(1,1)
-            ax.plot(cv_b(init_traj))
-            ax.set_xlabel("frames")
-            ax.set_ylabel(f"CV {cv}")
-            plt.savefig(f"{cv}_initial_trajectory.png", dpi=300)
-            plt.close()
-        def descriptor_transform(s, cvs):
-            import numpy as np
-            return np.array([cv(s) for cv in cvs])
-        bound =[]
-        unbound =[]
-        for i,cv in enumerate(cvs):
-            if cv_config[cv.name].get('bound') is not None:
-                print("Defining bound for CV:", cv.name)
-                print(cv_config[cv.name]['bound'])
-                bound_cv = paths.CVDefinedVolume(cv, lambda_min=cv_config[cv.name]['bound'][0], lambda_max=cv_config[cv.name]['bound'][1]).named(f'bound_{cv.name}')
-                bound.append(bound_cv)
+            cvs.append(cv_obj)
 
-            if cv_config[cv.name].get('unbound') is not None:
-                print("Defining unbound for CV:", cv.name)
-                print(cv_config[cv.name]['unbound'])
-                unbound_cv = paths.CVDefinedVolume(cv, lambda_min=cv_config[cv.name]['unbound'][0], lambda_max=cv_config[cv.name]['unbound'][1]).named(f'unbound_{cv.name}')    
-                unbound.append(unbound_cv)
+            # Plot CV along initial trajectory
+            fig, ax = plt.subplots()
+            ax.plot(cv_obj(init_traj))
+            ax.set_xlabel("Frame")
+            ax.set_ylabel(cv_name)
+            fig.savefig(f"{cv_name}_initial_trajectory.png", dpi=150)
+            plt.close(fig)
+            logger.debug(f"Saved CV plot: {cv_name}_initial_trajectory.png")
 
-        print(len(bound), len(unbound))
-        for i in range(len(bound)-1):
-            bound[0]= bound[0] & bound[i+1]
-        for i in range(len(unbound)-1):
-            unbound[0]= unbound[0] & unbound[i+1]
+        # Build state volumes
+        bound_vols:   list[paths.Volume] = []
+        unbound_vols: list[paths.Volume] = []
 
-        self.states = (bound[0],unbound[0])
+        for cv_obj in cvs:
+            spec = cv_config[cv_obj.name]
+            if "bound" in spec:
+                lo, hi = spec["bound"]
+                bound_vols.append(
+                    paths.CVDefinedVolume(cv_obj, lambda_min=lo, lambda_max=hi)
+                    .named(f"bound_{cv_obj.name}")
+                )
+            if "unbound" in spec:
+                lo, hi = spec["unbound"]
+                unbound_vols.append(
+                    paths.CVDefinedVolume(cv_obj, lambda_min=lo, lambda_max=hi)
+                    .named(f"unbound_{cv_obj.name}")
+                )
+
+        if not bound_vols or not unbound_vols:
+            raise ValueError(
+                "At least one CV must define both 'bound' and 'unbound' ranges."
+            )
+
+        # Combine multiple bounds/unbounds with logical AND
+        bound_state   = bound_vols[0]
+        unbound_state = unbound_vols[0]
+        for vol in bound_vols[1:]:
+            bound_state = bound_state & vol
+        for vol in unbound_vols[1:]:
+            unbound_state = unbound_state & vol
+
+        self.states = (bound_state, unbound_state)
+
+        # Descriptor transform: snapshot → 1-D array of CV values
+        self.descriptor_transform = paths.FunctionCV(
+            "descriptor_transform",
+            lambda snapshot, _cvs=cvs: np.array([c(snapshot) for c in _cvs]),
+            cv_wrap_numpy_array=True,
+        ).with_diskcache()
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
 
     @staticmethod
-    def bondfunction(snapshot, group_A_atoms, group_B_atoms,group_C_atoms, group_D_atoms,coeff=-1):
-        import numpy as np
-
-        A_com = snapshot.xyz[group_A_atoms, :]
-        B_com = snapshot.xyz[group_B_atoms, :]
-        C_com = snapshot.xyz[group_C_atoms, :]
-        D_com = snapshot.xyz[group_D_atoms, :]
-
-        ab = A_com - B_com
-        cd = C_com - D_com
-
-
-
-        # Calculate the angle between the two vectors
-        angle = np.linalg.norm(ab) + coeff * np.linalg.norm(cd)
-        return angle
-
-    @staticmethod
-    def bond(snapshot, group_A_atoms, group_B_atoms,type=0,axis=-1): 
-        import numpy as np
-
-        A_com = snapshot.xyz[group_A_atoms, :]
-        B_com = snapshot.xyz[group_B_atoms, :]
-
-        # # make sure A_com and B_com are 2d arrays
-        A_com = np.atleast_2d(A_com)
-        B_com = np.atleast_2d(B_com)
-
-        if type==0:
-            A_com = np.mean(A_com, axis=0)
-            B_com = np.mean(B_com, axis=0)
-            ab = A_com - B_com
-            if axis >= 0:
-                angle = ab[axis]
+    def _resolve_atom_selections(params: dict, traj_path: str) -> dict:
+        """
+        Replace MDAnalysis selection strings with integer index arrays.
+        Non-string parameters are passed through unchanged.
+        """
+        resolved = {}
+        universe = None  # lazy init
+        for key, val in params.items():
+            if isinstance(val, str):
+                if universe is None:
+                    universe = mda.Universe(traj_path)
+                resolved[key] = universe.select_atoms(val).indices
             else:
-                angle = np.linalg.norm(ab)
-            return angle
+                resolved[key] = val
+        return resolved
 
-        elif type==-1:
-            A_com = np.reshape(A_com, ( -1, 3))
-            B_com = np.reshape(B_com, ( -1, 3))
-            dists = distance_array(A_com, B_com)
-            if axis >= 0:
-                return np.min(dists[:, axis])
-            else:
-                return np.min(dists)
-        elif type==1:
-            A_com = np.reshape(A_com, ( -1, 3))
-            B_com = np.reshape(B_com, ( -1, 3))
-            dists = distance_array(A_com, B_com)
-            if axis >= 0:
-                return np.max(dists[:, axis])
-            else:   
-                return np.max(dists)
-        else:
-            raise ValueError(f"Unknown bond type: {type}")
-        
+    # ------------------------------------------------------------------
+    # CV functions (static methods)
+    # ------------------------------------------------------------------
+
     @staticmethod
-    def CN(snapshot, group_A_atoms, group_B_atoms, d0=1.25, n=12, m=24):
-        d0 = d0/10  # in nm
+    def bond(
+        snapshot,
+        group_A_atoms: np.ndarray,
+        group_B_atoms: np.ndarray,
+        type: int = 0,
+        axis: int = -1,
+    ) -> float:
+        """
+        Distance-based CV between two groups of atoms.
+
+        Parameters
+        ----------
+        type : {0, -1, 1}
+            0  → distance between group COMs (or projection on ``axis``).
+            -1 → minimum pairwise distance.
+            1  → maximum pairwise distance.
+        axis : int
+            Cartesian axis index (0=x, 1=y, 2=z) for projection, or -1 for norm.
+        """
+        A = np.atleast_2d(snapshot.xyz[group_A_atoms, :])
+        B = np.atleast_2d(snapshot.xyz[group_B_atoms, :])
+
+        if type == 0:
+            diff = A.mean(axis=0) - B.mean(axis=0)
+            return float(diff[axis] if axis >= 0 else np.linalg.norm(diff))
+
+        dists = distance_array(A.reshape(-1, 3), B.reshape(-1, 3))
+        if type == -1:
+            return float(np.min(dists[:, axis]) if axis >= 0 else np.min(dists))
+        if type == 1:
+            return float(np.max(dists[:, axis]) if axis >= 0 else np.max(dists))
+        raise ValueError(f"Unknown bond type: {type}")
+
+    @staticmethod
+    def bondfunction(
+        snapshot,
+        group_A_atoms: np.ndarray,
+        group_B_atoms: np.ndarray,
+        group_C_atoms: np.ndarray,
+        group_D_atoms: np.ndarray,
+        coeff: float = -1,
+    ) -> float:
+        """Linear combination of two inter-group distances: |AB| + coeff * |CD|."""
+        ab = snapshot.xyz[group_A_atoms, :] - snapshot.xyz[group_B_atoms, :]
+        cd = snapshot.xyz[group_C_atoms, :] - snapshot.xyz[group_D_atoms, :]
+        return float(np.linalg.norm(ab) + coeff * np.linalg.norm(cd))
+
+    @staticmethod
+    def CN(
+        snapshot,
+        group_A_atoms: np.ndarray,
+        group_B_atoms: np.ndarray,
+        d0: float = 1.25,
+        n: int = 12,
+        m: int = 24,
+    ) -> float:
+        """
+        Coordination number using the rational switching function.
+
+        s_ij = (1 - (r/d0)^n) / (1 - (r/d0)^m)
+
+        Parameters
+        ----------
+        d0 : float
+            Reference distance in Å (converted internally to nm).
+        n, m : int
+            Exponents of the switching function.
+        """
+        d0_nm = d0 / 10  # Å → nm
         o1 = snapshot.xyz[group_A_atoms, :]
-        h = snapshot.xyz[group_B_atoms, :]
-
+        h  = snapshot.xyz[group_B_atoms, :]
         dist = distance_array(o1, h)
-
-
-        s_ij = (1 - (dist / d0)**n) / (1 - (dist / d0)**m)
-
-        cn = np.sum(s_ij)
-        return cn
-    
-    @staticmethod
-    def bond_count(snapshot, group_A_atoms, group_B_atoms,value=1.5,rounding=2):
-        import numpy as np
-
-        A_com = snapshot.xyz[group_A_atoms, :]
-        B_com = snapshot.xyz[group_B_atoms, :]
-
-        # # make sure A_com and B_com are 2d arrays
-        A_com = np.atleast_2d(A_com)
-        B_com = np.atleast_2d(B_com)
-
-        A_com = np.reshape(A_com, ( -1, 3))
-        B_com = np.reshape(B_com, ( -1, 3))
-        dists = distance_array(A_com, B_com)
-        count = np.sum(np.round(dists,rounding) == value)
-        return count
-
-    # ! TO BE DELETED : already implemented in bond function with axis=2
-    @staticmethod
-    def atom_surface(snapshot, group_A_atoms, group_B_atoms): 
-        import numpy as np
-
-        A_com = snapshot.xyz[group_A_atoms, :]
-        B_com = snapshot.xyz[group_B_atoms, :]
-
-        # # make sure A_com and B_com are 2d arrays
-        A_com = np.atleast_2d(A_com)
-        B_com = np.atleast_2d(B_com)
-
-
-        A_com = np.mean(A_com[:,2], axis=0)
-        B_com = np.mean(B_com[:,2], axis=0)
-        ab = A_com - B_com
-        # Calculate the angle between the two vectors
-        angle = np.linalg.norm(ab)
-        return angle
-    
-    @staticmethod
-    def bond_plane_angle(snapshot, group_A_atoms, group_B_atoms,axis=2):
-        import numpy as np
-
-        A_com = snapshot.xyz[group_A_atoms, :]
-        B_com = snapshot.xyz[group_B_atoms, :]
-
-        # # make sure A_com and B_com are 2d arrays
-        A_com = np.atleast_2d(A_com)
-        B_com = np.atleast_2d(B_com)
-
-        A_com = np.mean(A_com, axis=0)
-        B_com = np.mean(B_com, axis=0)
-        ab = A_com - B_com
-        angle = np.degrees(np.arccos(ab[axis]/np.linalg.norm(ab)))-90
-        return angle
+        s_ij = (1 - (dist / d0_nm) ** n) / (1 - (dist / d0_nm) ** m)
+        return float(np.sum(s_ij))
 
     @staticmethod
-    def distance_to_OH(snapshot,O_indices,H_indices, atom, bond_cutoff=1.3):
+    def bond_count(
+        snapshot,
+        group_A_atoms: np.ndarray,
+        group_B_atoms: np.ndarray,
+        value: float = 1.5,
+        rounding: int = 2,
+    ) -> int:
+        """Count atom pairs whose distance equals ``value`` Å (after rounding)."""
+        A = np.atleast_2d(snapshot.xyz[group_A_atoms, :]).reshape(-1, 3)
+        B = np.atleast_2d(snapshot.xyz[group_B_atoms, :]).reshape(-1, 3)
+        dists = distance_array(A, B)
+        return int(np.sum(np.round(dists, rounding) == value))
+
+    @staticmethod
+    def bond_plane_angle(
+        snapshot,
+        group_A_atoms: np.ndarray,
+        group_B_atoms: np.ndarray,
+        axis: int = 2,
+    ) -> float:
+        """
+        Angle (degrees) between the A→B COM vector and the plane perpendicular
+        to ``axis``.  Returns values in [-90, 90].
+        """
+        A = np.atleast_2d(snapshot.xyz[group_A_atoms, :]).mean(axis=0)
+        B = np.atleast_2d(snapshot.xyz[group_B_atoms, :]).mean(axis=0)
+        ab = A - B
+        return float(np.degrees(np.arccos(ab[axis] / np.linalg.norm(ab))) - 90)
+
+    @staticmethod
+    def distance_to_OH(
+        snapshot,
+        O_indices: np.ndarray,
+        H_indices: np.ndarray,
+        atom: int,
+        bond_cutoff: float = 1.3,
+        box: np.ndarray | None = None,
+    ) -> float:
+        """
+        Distance from ``atom`` to the other hydroxide oxygen in the simulation.
+
+        Returns ``np.inf`` if fewer than two OH groups are detected.
+
+        Parameters
+        ----------
+        O_indices, H_indices : array of int
+            Indices of oxygen and hydrogen atoms in the system.
+        atom : int
+            Index of the reference oxygen atom.
+        bond_cutoff : float
+            O–H bond cutoff in Å.
+        box : array of shape (6,), optional
+            Periodic box dimensions [Lx, Ly, Lz, α, β, γ] in Å.
+        """
         from MDAnalysis.lib.distances import capped_distance
-        import numpy as np
-
-        """
-        If 'atom' is the distance to be calculated from,
-        return distance to the other OH oxygen.
-        Otherwise return np.inf.
-        """
 
         pairs, _ = capped_distance(
             snapshot.xyz[0, O_indices, :],
             snapshot.xyz[0, H_indices, :],
-            max_cutoff=bond_cutoff/10,
-            box=np.array([14.46, 14.46, 40,90,90,90]) # ! URGENT: Update to take from topology
+            max_cutoff=bond_cutoff / 10,
+            box=box,
         )
-
         if len(pairs) == 0:
             return np.inf
 
-        O_indice_new, h_counts = np.unique(pairs[:, 0], return_counts=True)
+        unique_O, h_counts = np.unique(pairs[:, 0], return_counts=True)
+        oh_indices = unique_O[h_counts == 1]  # oxygens bonded to exactly one H
 
-        hydroxide_mask = (h_counts == 1)
-        oh_group_indices = O_indice_new[hydroxide_mask]
-
-        if len(oh_group_indices) < 2:
+        if len(oh_indices) < 2:
             return np.inf
-        
-        oh_oxygens_indices = O_indices[oh_group_indices]
-        oh_oxygens = snapshot.xyz[0, oh_oxygens_indices, :]
 
-        # Get the other OH oxygen
-        other_O = oh_oxygens[oh_oxygens_indices != atom]
-
+        oh_oxygens = O_indices[oh_indices]
+        other_O    = snapshot.xyz[0, oh_oxygens[oh_oxygens != atom], :]
         if len(other_O) == 0:
             return np.inf
 
-        dist = np.linalg.norm(snapshot.xyz[0][atom] - other_O[0])
-        return dist
+        return float(np.linalg.norm(snapshot.xyz[0, atom] - other_O[0]))

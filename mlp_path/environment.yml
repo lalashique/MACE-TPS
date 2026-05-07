@@ -1,0 +1,67 @@
+name: mlpath
+channels:
+  - conda-forge
+  - pytorch
+  - nvidia
+  - defaults
+
+dependencies:
+  # ── Python ──────────────────────────────────────────────────────────────────
+  - python=3.11
+
+  # ── Core scientific stack ───────────────────────────────────────────────────
+  - numpy>=1.26
+  - scipy>=1.12
+  - matplotlib>=3.8
+  - tqdm>=4.66
+
+  # ── ASE (Atomic Simulation Environment) ─────────────────────────────────────
+  - ase>=3.23
+
+  # ── MDAnalysis ──────────────────────────────────────────────────────────────
+  - mdanalysis>=2.7
+
+  # ── mdtraj ──────────────────────────────────────────────────────────────────
+  - mdtraj>=1.9
+
+  # ── OpenMM ──────────────────────────────────────────────────────────────────
+  - openmm>=8.1                   # MD engine
+  - openmmtools>=0.23             # VVVRIntegrator
+
+  # ── PyTorch (CPU-only base; override with GPU build if needed) ───────────────
+  - pytorch>=2.2
+  - cpuonly                       # remove this line and add cudatoolkit for GPU
+
+  # ── YAML / config ───────────────────────────────────────────────────────────
+  - pyyaml>=6.0
+  - loguru>=0.7
+
+  # ── Jupyter ─────────────────────────────────────────────────────────────────
+  - jupyterlab>=4.0
+  - ipywidgets>=8.0
+  - nbformat>=5.9
+
+  # ── Testing ─────────────────────────────────────────────────────────────────
+  - pytest>=8.0
+  - pytest-mock>=3.12
+
+  # ── pip-only packages ───────────────────────────────────────────────────────
+  - pip
+  - pip:
+    # MACE interatomic potential
+    - mace-torch>=0.3.6
+
+    # OpenPathSampling (TPS framework)
+    - openpathsampling>=1.6
+
+    # openmmml (MACE-as-OpenMM-potential bridge)
+    - openmmml>=0.3
+
+    # FAIRChem / Open Catalyst (foundation models, optional)
+    # - fairchem-core>=1.0        # uncomment if using foundation models
+
+    # CP2K Python interface (optional, for _parse_outputs)
+    # - cpoker                    # uncomment if available in your environment
+
+    # PLUMED Python bindings (optional, for biased MD)
+    # - plumed                    # uncomment if PLUMED is installed system-wide

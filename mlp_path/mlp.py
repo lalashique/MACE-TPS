@@ -1,47 +1,98 @@
-import sys
+"""
+mlp.py — Machine Learning Potential interface for the mlpath workflow.
+
+Provides an abstract base (MLP) and a concrete MACE implementation (MACE_MLP).
+Supports training committees of models (same architecture, different seeds) for
+uncertainty quantification, plus MD, minimisation, and evaluation utilities.
+
+Typical usage
+-------------
+    from mlp import create_mlp
+
+    mlp = create_mlp("mace", "train.yaml", E0s={1: -13.5, 8: -428.9})
+    mlp.train(
+        train_file="data/train.xyz",
+        test_file="data/test.xyz",
+        seeds=[123, 234, 345],
+        prepare_only=True,   # write configs + PAUSE; submit jobs externally
+        absolute_paths=True,
+    )
+
+CLI usage
+---------
+    python mlp.py --method run_md --model_path model.model --md_params md.json
+    python mlp.py --method evaluate --model_path model.model \
+                  --input_file data.xyz --output_file out.xyz
+"""
+
+from __future__ import annotations
+
+import inspect
+import json
 import logging
+import sys
+import time
 import warnings
 from abc import ABC, abstractmethod
-from loguru import logger
 from pathlib import Path
-import yaml
-import os
-import time
 
 import numpy as np
+import yaml
+from loguru import logger
 
 warnings.filterwarnings("ignore")
 
-# --- Base class ---
+
+# ---------------------------------------------------------------------------
+# Abstract base
+# ---------------------------------------------------------------------------
+
 class MLP(ABC):
-    def __init__(self, config_file):
+    """Abstract base class for machine learning potential wrappers."""
+
+    def __init__(self, config_file: str | Path | None) -> None:
         self.config_file = Path(config_file) if config_file else None
         self.model = None
 
     @abstractmethod
-    def train(self, seed=None, output_dir=None):
-        pass
+    def train(self, **kwargs): ...
 
     @abstractmethod
-    def load(self, model_path):
-        pass
+    def load(self, model_path: str | Path): ...
 
     @abstractmethod
-    def predict(self, data):
-        pass
-    
-    # @abstractmethod 
-    # @staticmethod
-    # def run_md(model_paths, structure, md_params):
-    #     pass
+    def predict(self, data): ...
 
-# --- MACE implementation ---
+
+# ---------------------------------------------------------------------------
+# MACE implementation
+# ---------------------------------------------------------------------------
+
 class MACE_MLP(MLP):
-    DEFAULT_CONFIG = {
+    """
+    Wrapper around the MACE interatomic potential.
+
+    Supports:
+    - Training one or more committee models (different random seeds).
+    - Loading a single model or an entire committee from a directory.
+    - Committee-based uncertainty estimation (energy/force variance).
+    - Running NVT/NVE molecular dynamics via ASE.
+    - Running BFGS geometry minimisation via ASE.
+    - Evaluating a model on a structure file and writing predictions.
+
+    Parameters
+    ----------
+    config_file : str or Path, optional
+        Path to a YAML config file.  If not provided the built-in defaults
+        are used.
+    E0s : dict, optional
+        Isolated-atom reference energies {atomic_number: energy_eV}.
+        Required for training.
+    """
+
+    DEFAULT_CONFIG: dict = {
         "model": "MACE",
         "num_channels": 32,
-        # "max_L": 0,
-        # "correlation": 3,
         "r_max": 4.5,
         "name": "mace01",
         "model_dir": "MACE_models",
@@ -53,7 +104,7 @@ class MACE_MLP(MLP):
         "test_file": "data/test.xyz",
         "energy_key": "energy_cp2k",
         "forces_key": "forces_cp2k",
-        "E0s": "{1: -13.50896562 , 6: -145.7376780, 8: -428.8933516,46: -3454.585309 , 78: -3262.604121 }",
+        "E0s": "{}",
         "device": "cuda",
         "batch_size": 4,
         "max_num_epochs": 100,
@@ -67,56 +118,81 @@ class MACE_MLP(MLP):
         "error_table": "PerAtomRMSE",
     }
 
-    def __init__(self, config_file=None,E0s=None):
+    def __init__(
+        self,
+        config_file: str | Path | None = None,
+        E0s: dict | None = None,
+    ) -> None:
         super().__init__(config_file)
-        self.config = self._get_config()
-
+        self.config = self._load_config()
         self.E0s = E0s
-            
-        # from mace.cli.run_train import main as mace_train
-        # from mace.calculators import mace_calculator
-        # self._train_func = mace_train
-        # self._calc_cls = mace_calculator
-        self.committee_models = []
+        self.committee_models: list = []
 
-    def _get_config(self):
+    # ------------------------------------------------------------------
+    # Config
+    # ------------------------------------------------------------------
+
+    def _load_config(self) -> dict:
         if self.config_file and self.config_file.exists():
             with open(self.config_file) as f:
                 return yaml.safe_load(f)
         return dict(self.DEFAULT_CONFIG)
 
+    # ------------------------------------------------------------------
+    # Training
+    # ------------------------------------------------------------------
+
     def train(
         self,
-        seeds=None,
-        output_dir="runs",
-        train_file=None,
-        test_file=None,
-        train_test_split=None,
-        prepare_only=False,
-        absolute_paths=False,
-        hpc_command_template="python -m mace.cli.run_train --config {config}",
-    ):  
-        """Train one or multiple models (committee)."""
+        seeds: int | list[int] | None = None,
+        output_dir: str = "runs",
+        train_file: str | None = None,
+        test_file: str | None = None,
+        prepare_only: bool = False,
+        absolute_paths: bool = False,
+        hpc_command_template: str = "python -m mace.cli.run_train --config {config}",
+    ) -> list | object | None:
+        """
+        Prepare training configs and (optionally) launch training.
+
+        Parameters
+        ----------
+        seeds : int or list[int], optional
+            Random seed(s).  One committee member is trained per seed.
+        output_dir : str
+            Root directory for committee member subdirectories.
+        train_file : str, optional
+            Path to training XYZ file.
+        test_file : str, optional
+            Path to test XYZ file.
+        prepare_only : bool
+            If True, write configs and print HPC commands but do not run.
+        absolute_paths : bool
+            Store absolute paths in the generated YAML configs.
+        hpc_command_template : str
+            Template for the HPC submission command (unused if prepare_only=False).
+
+        Returns
+        -------
+        Trained model(s) or None if prepare_only=True.
+        """
         if seeds is None:
             seeds = [self.DEFAULT_CONFIG["seed"]]
-        if not isinstance(seeds, (list, tuple)):
+        if isinstance(seeds, int):
             seeds = [seeds]
 
-        if not test_file and train_test_split:
-            raise NotImplementedError("train_test_split is not implemented yet.")
+        if not self.E0s:
+            raise ValueError("E0s must be provided for training.")
+        if not absolute_paths and train_file:
+            raise NotImplementedError(
+                "Relative paths are not supported; set absolute_paths=True."
+            )
 
         base_dir = Path(output_dir)
         base_dir.mkdir(parents=True, exist_ok=True)
-        if train_file:
-            train_file = Path(train_file)
-            test_file = Path(test_file) 
-            if absolute_paths:
-                train_file_path = os.path.abspath(train_file)
-                test_file_path = os.path.abspath(test_file)
-            else:
-                raise NotImplementedError
-        trained_models = []
-        hpc_cmds = []
+
+        hpc_cmds: list[str] = []
+        trained_models: list = []
 
         for i, seed in enumerate(seeds):
             member_dir = base_dir / (f"committee_{i:02d}" if len(seeds) > 1 else "")
@@ -127,390 +203,491 @@ class MACE_MLP(MLP):
                 self._run_training(cmd)
                 model_path = next(member_dir.glob("*.model"), None)
                 if model_path:
-                    trained_models.append(self._calc_cls(model_path))
+                    from mace.calculators import MACECalculator
+                    trained_models.append(MACECalculator(model_paths=model_path, device="cuda"))
 
-        # if preparing only, print out HPC commands
         if prepare_only:
-            print("\nHPC training commands:")
+            logger.info("HPC training commands:")
             for cmd in hpc_cmds:
-                print(cmd)
-            return
+                logger.info(f"  {cmd}")
+            return None
 
         self.committee_models = trained_models
         if len(seeds) == 1 and trained_models:
             self.model = trained_models[0]
-        return trained_models if len(seeds) > 1 else trained_models[0]
+        return trained_models if len(seeds) > 1 else (trained_models[0] if trained_models else None)
 
-    def _prepare_member(self, seed, output_dir, train_file=None, test_file=None):
-
-        cfg = self.config  # make a copy
+    def _prepare_member(
+        self,
+        seed: int,
+        output_dir: Path,
+        train_file: str | None,
+        test_file: str | None,
+    ) -> str:
+        cfg = dict(self.config)
         cfg["seed"] = seed
-
-        if self.E0s:
-            cfg["E0s"] = self.E0s
-        else:
-            raise ValueError("E0s must be provided for training.")
-        
+        cfg["E0s"] = str(self.E0s)
 
         if train_file:
-            cfg["train_file"] = str(Path(train_file).absolute())
+            cfg["train_file"] = str(Path(train_file).resolve())
         if test_file:
-            cfg["test_file"] = str(Path(test_file).absolute())
+            cfg["test_file"] = str(Path(test_file).resolve())
 
-        out = Path(output_dir)
-        out.mkdir(parents=True, exist_ok=True)
-        
-        # cfg["model_dir"] = str(out)
-        # cfg["log_dir"] = str(out)
-        # cfg["results_dir"] = str(out)
-        # cfg["checkpoints_dir"] = str(out / "chkpt")
+        output_dir.mkdir(parents=True, exist_ok=True)
 
-        tmp_cfg = out / f"train_seed{seed}.yaml"
-        with open(tmp_cfg, "w") as f:
+        yaml_path = output_dir / f"train_seed{seed}.yaml"
+        with open(yaml_path, "w") as f:
             yaml.safe_dump(cfg, f)
 
-        # put a PAUSE file in the output dir to indicate preparation is done
-        pause_file = out / "PAUSE"
-        with open(pause_file, "w") as f:
-            f.write("")  # empty PAUSE file
-        
-        out = out.resolve()
+        (output_dir / "PAUSE").touch()
 
-        return f"cd {out} && python -m mace.cli.run_train --config train_seed{seed}.yaml"
+        return f"cd {output_dir.resolve()} && python -m mace.cli.run_train --config {yaml_path.name}"
 
-    def _run_training(self, command):
+    def _run_training(self, command: str) -> None:
+        from mace.cli.run_train import main as mace_train
         logging.getLogger().handlers.clear()
         sys.argv = command.split()
-        self._train_func()
+        mace_train()
 
-    def load(self, model_path_or_dir):
+    # ------------------------------------------------------------------
+    # Loading
+    # ------------------------------------------------------------------
+
+    def load(self, model_path_or_dir: str | Path) -> object:
+        """Load a single MACE model (from a file or the first .model in a dir)."""
+        from mace.calculators import MACECalculator
         p = Path(model_path_or_dir)
         if p.is_dir():
-            models = list(p.glob("*.model"))
-            if not models:
-                raise FileNotFoundError(f"No model found in {p}")
-            p = models[0]
-        self.model = self._calc_cls(p)
+            candidates = list(p.glob("*.model"))
+            if not candidates:
+                raise FileNotFoundError(f"No .model file found in {p}")
+            p = candidates[0]
+        self.model = MACECalculator(model_paths=p, device="cuda")
         return self.model
 
-    def load_committee(self, base_dir):
+    def load_committee(self, base_dir: str | Path) -> list:
+        """Load all committee models from ``base_dir/committee_*/``."""
+        from mace.calculators import MACECalculator
         base = Path(base_dir)
-        members = sorted(base.glob("committee_*"))
-        self.committee_models = [
-            self._calc_cls(next(m.glob("*.model"))) for m in members if list(m.glob("*.model"))
-        ]
+        self.committee_models = []
+        for member in sorted(base.glob("committee_*")):
+            model_file = next(member.glob("*.model"), None)
+            if model_file:
+                self.committee_models.append(
+                    MACECalculator(model_paths=model_file, device="cuda")
+                )
         return self.committee_models
 
-    def predict(self, data, committee=False, return_std=False):
+    # ------------------------------------------------------------------
+    # Prediction
+    # ------------------------------------------------------------------
+
+    def predict(self, data, committee: bool = False, return_std: bool = False):
+        """
+        Predict energy (and optionally std) for ``data``.
+
+        Parameters
+        ----------
+        data : ASE Atoms
+            Input structure.
+        committee : bool
+            Average over all committee models.
+        return_std : bool
+            Also return the standard deviation across committee predictions.
+        """
         if committee and self.committee_models:
             preds = np.array([m.calculate(data)["energy"] for m in self.committee_models])
             mean = preds.mean(axis=0)
-            if return_std:
-                std = preds.std(axis=0)
-                return mean, std
-            return mean
-        elif self.model:
+            return (mean, preds.std(axis=0)) if return_std else mean
+        if self.model:
             return self.model.calculate(data)
-        else:
-            raise RuntimeError("No model loaded.")
-    @staticmethod
-    def run_md(model_path, md_params,plumed=None,type= "local", esen_foundational_model=False):
-        from ase.io import read
-        
-        from ase import Atoms
-        from ase.calculators.plumed import Plumed
-        from ase import units
-        import json 
+        raise RuntimeError("No model loaded. Call load() or train() first.")
 
-
-        if type == "local":
-            try:
-                model_path = model_path if isinstance(model_path, Path) else Path(model_path)
-            except Exception as e:
-                raise ValueError(f"Invalid model path: {model_path}") from e
-
-        elif type == "universal":
-            raise NotImplementedError("Universal type MD is not implemented yet.")
-        
-        try:
-            with open(md_params, 'r') as f:
-                md_params = json.load(f)
-        except Exception as e:
-            raise ValueError(f"Error reading md_params: {md_params}") from e
-        initial_time = time.time()
-        restart = md_params.get("restart", False)
-        initalize_velocities = md_params.get("initialize_velocities", True)
-        if restart:
-            if not Path('md_out.xyz').exists():
-                raise FileNotFoundError("md_out.xyz not found for restart.")
-            init_conf = read('md_out.xyz', -1)
-            logger.debug(f"Restarting MD from md_out.xyz with {len(init_conf)} atoms.")
-        else:   
-            init_conf = read('coord.xyz', '0')
-        if "cell" in md_params:
-            logger.debug(f"Setting cell from md_params{np.diag(np.array(md_params['cell'],dtype=float))}.")
-            init_conf.cell = np.diag(np.array(md_params["cell"],dtype=float))
-            init_conf.center()
-            init_conf.set_pbc((True, True, True))
-        elif init_conf.cell is not None and not init_conf.cell.any() == 0:
-            logger.debug(f"Using cell from coord file: {init_conf.cell}.")
-            init_conf.set_pbc((True, True, True))
-        else:
-            raise ValueError("Cell parameters are missing in both the coord file and md_params.")
-        # init_conf.cell = ([ 11.24800,9.7410,40])
-        # init_conf.set_pbc((True, True, True))
-        print(init_conf)
-        #using one of the esen foundation models
-        if esen_foundational_model:
-            from fairchem.core import FAIRChemCalculator
-            calculator = FAIRChemCalculator.from_model_checkpoint(name_or_path=str(model_path), device="cuda")
-        else:
-            from mace.calculators import MACECalculator
-            calculator = MACECalculator(model_paths= model_path, device='cuda')
-        # init_conf.set_calculator(calculator)
-        # check if timestep 
-        timestep = float(md_params.get("time_step",1.0))*units.fs  # default 1 fs
-        logger.debug(f"MD Timestep: {float(md_params.get('time_step',1.0))} fs")
-        ps = 1000 * units.fs
-        logger.debug(f"MD Timestep: {ps} ps")
-        if plumed:
-            plumed = Path(plumed)
-            #check if plumed file exists
-            if not plumed.exists():
-                raise FileNotFoundError(f"Plumed file not found: {plumed}")
-            setup = [f"UNITS LENGTH=A TIME={1/ps} ENERGY={units.mol/units.kJ}"]
-            if restart:
-                setup.append("RESTART")
-            setup.append(f'INCLUDE FILE={str(plumed)}')
-
-            init_conf.calc = Plumed(calc=calculator,
-                                    input=setup,
-                                    timestep=timestep/units.fs/1000,
-                                    atoms=init_conf,
-                                    kT=0.03)
-        else:
-            init_conf.calc = calculator
-        
-        from ase.md import MDLogger
-        from ase.md.langevin import Langevin
-        temperature = md_params.get("temperature", 330)  # default 300 K
-        friction = md_params.get("friction", 5e-3)  # default 5e-3 1/fs
-
-        thermostat = md_params.get("thermostat", "Langevin")
-        if thermostat == "Langevin":
-            logger.debug(f"Using Langevin thermostat with friction {friction} 1/fs.")
-            dyn = Langevin(init_conf, timestep, temperature_K=temperature, friction=friction,logfile='md_out.log')
-        elif thermostat == "NoseHooverChain":
-            from ase.md.nose_hoover_chain import NoseHooverChainNVT
-            dyn = NoseHooverChainNVT(init_conf, timestep, temperature_K=temperature, tdamp=50* units.fs, tchain=4,logfile='md_out.log')
-        elif thermostat == "Berendsen":
-            from ase.md.berendsen import Berendsen
-            tau = md_params.get("tau", 25*timestep)  # default 25*timestep
-            logger.debug(f"Using Berendsen thermostat with tau {tau} fs.")
-            dyn = Berendsen(init_conf, timestep, temperature_K=temperature, taut= tau,logfile='md_out.log')
-        elif thermostat == "VelocityVerlet":
-            from ase.md.velocityverlet import VelocityVerlet
-            logger.debug(f"Using Velocity Verlet integrator (NVE).")
-            dyn = VelocityVerlet(init_conf, timestep,logfile='md_out.log')
-        else:
-            raise ValueError(f"Unknown thermostat: {thermostat}")
-        
-        def write_frame():
-                dyn.atoms.write('md_out.xyz', append=True)
-        def write_frame_small():
-                dyn.atoms.write('md_out_small.xyz', append=True)
-        step = 0
-        def write_time():
-                nonlocal step
-                if step == 0:
-                        step = time.time()
-                time_per_step = time.time() - step
-                with open('md_out.time', 'a') as f:
-                        f.write(str(time_per_step)+'\n')
-                step = time.time()
-
-        interval = int(md_params.get("interval", 1))
-        small_interval = int(md_params.get("small_interval", 50))
-
-        if initalize_velocities and restart== False:
-            from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
-            MaxwellBoltzmannDistribution(init_conf, temperature_K=temperature)
-            logger.debug(f"Initialized velocities at {temperature} K using Maxwell-Boltzmann distribution.")
-        elif restart:
-            logger.debug(f"Restarting MD from existing velocities.")
-            init_conf.set_velocities(init_conf.get_velocities())
-        else:
-            logger.debug(f"Velocities not initialized.")
-
-        dyn.attach(write_frame, interval=interval)
-        dyn.attach(write_frame_small, interval=small_interval)
-        dyn.attach(write_time, interval=1)
-
-        total_steps = int(md_params.get("total_steps", 15000))
-        dyn.run(total_steps)
-        print("MD finished!")
-        pause_file = Path("PAUSE")
-        if pause_file.exists():
-            pause_file.unlink()
-
-        with open('md_out.time', 'a') as f:
-            f.write(str(time.time() - initial_time)+'\n')
-    
-    @staticmethod
-    def run_minimization(model_path, md_params,type= "local"):
-        from ase.io import read
-        from mace.calculators import MACECalculator
-        from ase import Atoms
-        from ase.optimize import BFGS
-        import json 
-
-        if type == "local":
-            try:
-                model_path = model_path if isinstance(model_path, Path) else Path(model_path)
-            except Exception as e:
-                raise ValueError(f"Invalid model path: {model_path}") from e
-
-        elif type == "universal":
-            raise NotImplementedError("Universal type minimization is not implemented yet.")
-        try:
-            with open(md_params, 'r') as f:
-                md_params = json.load(f)
-        except Exception as e:
-            raise ValueError(f"Error reading md_params: {md_params}") from e
-        
-        init_conf = read('coord.xyz', '0')
-
-        #check if cell is present in the xyz file
-        if "cell" in md_params:
-            logger.debug(f"Setting cell from md_params{np.diag(np.array(md_params['cell'],dtype=float))}.")
-            init_conf.cell = np.diag(np.array(md_params["cell"],dtype=float))
-            init_conf.center()
-            init_conf.set_pbc((True, True, True))
-        elif init_conf.cell is not None and not init_conf.cell.any() == 0:
-            logger.debug(f"Using cell from coord file: {init_conf.cell}.")
-            init_conf.set_pbc((True, True, True))
-        else:
-            raise ValueError("Cell parameters are missing in both the coord file and md_params.")
-
-        calculator = MACECalculator(model_paths= model_path, device='cuda')
-        init_conf.set_calculator(calculator)
-        def write_frame():
-                dyn.atoms.write('md_out.xyz', append=True)
-        dyn = BFGS(init_conf, trajectory='minimization.traj')
-        max_steps = int(md_params.get("max_steps", 1000))
-        fmax = float(md_params.get("fmax", 0.01))
-        interval = int(md_params.get("interval", 1))
-        dyn.attach(write_frame, interval=interval)
-
-        dyn.run(fmax=fmax, steps=max_steps)
-        print("Minimization finished!")
+    # ------------------------------------------------------------------
+    # Committee uncertainty
+    # ------------------------------------------------------------------
 
     @staticmethod
-    def evaluate_committee(atoms,committee_calcs):
-        """Compute committee energy/force variances and store in atoms.info/arrays."""
-        main_calc = atoms.calc  # backup
-        energies, forces = [], []
+    def evaluate_committee(atoms, committee_calcs: list) -> None:
+        """
+        Run all committee models on ``atoms`` and store variance statistics in-place.
+
+        Adds to ``atoms.info``:
+        - ``energy_m{i}``     — per-model energy
+        - ``energy_variance`` — variance across models
+        - ``force_variance``  — mean force variance across atoms and models
+
+        Adds to ``atoms.arrays``:
+        - ``forces``           — forces from model 0
+        - ``force_var_per_atom`` — per-atom mean force variance
+        """
+        backup_calc = atoms.calc
+        energies: list[float] = []
+        forces: list[np.ndarray] = []
+
         for i, calc in enumerate(committee_calcs):
             atoms.calc = calc
-            energies.append(atoms.get_potential_energy())
-            forces.append(atoms.get_forces())
-            atoms.info[f"energy_m{i+1}"] = energies[-1]
+            e = atoms.get_potential_energy()
+            f = atoms.get_forces()
+            energies.append(e)
+            forces.append(f)
+            atoms.info[f"energy_m{i + 1}"] = e
             if i == 0:
-                atoms.arrays["forces"] = forces[-1]
-            # del atoms.arrays['momenta']
+                atoms.arrays["forces"] = f
 
-        energies = np.array(energies)
-        forces = np.stack(forces)
-        atoms.info["energy_variance"] = np.var(energies)
-        atoms.info["force_variance"] = np.var(forces, axis=0).mean()
-        atoms.arrays["force_var_per_atom"] = np.var(forces, axis=0).mean(axis=1)
-        atoms.calc = main_calc  # restore
+        e_arr = np.array(energies)
+        f_arr = np.stack(forces)          # shape (n_models, n_atoms, 3)
+
+        atoms.info["energy_variance"]     = float(np.var(e_arr))
+        atoms.info["force_variance"]      = float(np.var(f_arr, axis=0).mean())
+        atoms.arrays["force_var_per_atom"] = np.var(f_arr, axis=0).mean(axis=1)
+
+        atoms.calc = backup_calc
+
+    # ------------------------------------------------------------------
+    # Molecular dynamics
+    # ------------------------------------------------------------------
+
     @staticmethod
-    def evaluate(model_path, input_file,output_file,type= "local"):
+    def run_md(
+        model_path: str | Path,
+        md_params: str | Path,
+        plumed: str | Path | None = None,
+        type: str = "local",
+        esen_foundational_model: bool = False,
+    ) -> None:
+        """
+        Run NVT (or NVE) molecular dynamics using ASE.
+
+        Parameters
+        ----------
+        model_path : str or Path
+            Path to the trained MACE model (or FAIRChem checkpoint if
+            ``esen_foundational_model=True``).
+        md_params : str or Path
+            Path to a JSON file with MD settings.  Keys:
+
+            - ``restart``            (bool, default False)
+            - ``initialize_velocities`` (bool, default True)
+            - ``cell``               (list[float], optional)
+            - ``time_step``          (float, fs, default 1.0)
+            - ``temperature``        (float, K, default 330)
+            - ``friction``           (float, 1/fs, default 5e-3)
+            - ``thermostat``         (str, default "Langevin")
+            - ``total_steps``        (int, default 15000)
+            - ``interval``           (int, default 1)
+            - ``small_interval``     (int, default 50)
+
+        plumed : str or Path, optional
+            Path to a PLUMED input file for biased MD.
+        type : {"local", "universal"}
+            "local" uses the provided model; "universal" is not yet implemented.
+        esen_foundational_model : bool
+            Use a FAIRChem foundation model instead of MACE.
+        """
+        from ase import units
+        from ase.io import read
+        from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
+
+        if type != "local":
+            raise NotImplementedError(f"MD type '{type}' is not yet implemented.")
+
+        model_path = Path(model_path)
+        with open(md_params) as f:
+            params = json.load(f)
+
+        initial_time = time.time()
+        restart             = params.get("restart", False)
+        init_velocities     = params.get("initialize_velocities", True)
+        temperature         = params.get("temperature", 330)
+        friction            = params.get("friction", 5e-3)
+        timestep_fs         = float(params.get("time_step", 1.0))
+        timestep            = timestep_fs * units.fs
+        total_steps         = int(params.get("total_steps", 15000))
+        interval            = int(params.get("interval", 1))
+        small_interval      = int(params.get("small_interval", 50))
+        thermostat_name     = params.get("thermostat", "Langevin")
+
+        # Load initial configuration
+        if restart:
+            if not Path("md_out.xyz").exists():
+                raise FileNotFoundError("md_out.xyz not found for restart.")
+            init_conf = read("md_out.xyz", -1)
+            logger.debug("Restarting MD from md_out.xyz.")
+        else:
+            init_conf = read("coord.xyz", 0)
+
+        # Set periodic boundary / cell
+        if "cell" in params:
+            init_conf.cell = np.diag(np.array(params["cell"], dtype=float))
+            init_conf.center()
+            init_conf.set_pbc(True)
+        elif init_conf.cell is not None and init_conf.cell.any():
+            init_conf.set_pbc(True)
+        else:
+            raise ValueError("Cell parameters missing in both coord.xyz and md_params.")
+
+        # Calculator
+        if esen_foundational_model:
+            from fairchem.core import FAIRChemCalculator
+            calculator = FAIRChemCalculator.from_model_checkpoint(
+                name_or_path=str(model_path), device="cuda"
+            )
+        else:
+            from mace.calculators import MACECalculator
+            calculator = MACECalculator(model_paths=model_path, device="cuda")
+
+        # Optional PLUMED bias
+        if plumed:
+            from ase.calculators.plumed import Plumed
+            plumed = Path(plumed)
+            if not plumed.exists():
+                raise FileNotFoundError(f"PLUMED file not found: {plumed}")
+            ps = 1000 * units.fs
+            setup = [f"UNITS LENGTH=A TIME={1 / ps} ENERGY={units.mol / units.kJ}"]
+            if restart:
+                setup.append("RESTART")
+            setup.append(f"INCLUDE FILE={plumed}")
+            init_conf.calc = Plumed(
+                calc=calculator,
+                input=setup,
+                timestep=timestep_fs / 1000,
+                atoms=init_conf,
+                kT=0.03,
+            )
+        else:
+            init_conf.calc = calculator
+
+        # Thermostat / integrator
+        dyn = MACE_MLP._build_thermostat(
+            thermostat_name, init_conf, timestep, temperature, friction, params
+        )
+
+        # Velocity initialisation
+        if init_velocities and not restart:
+            MaxwellBoltzmannDistribution(init_conf, temperature_K=temperature)
+            logger.debug(f"Velocities initialised at {temperature} K (Maxwell-Boltzmann).")
+        elif restart:
+            init_conf.set_velocities(init_conf.get_velocities())
+
+        # Attach trajectory writers and timer
+        step_timer = {"last": time.time()}
+
+        def _write_frame():
+            dyn.atoms.write("md_out.xyz", append=True)
+
+        def _write_frame_small():
+            dyn.atoms.write("md_out_small.xyz", append=True)
+
+        def _write_time():
+            now = time.time()
+            with open("md_out.time", "a") as f:
+                f.write(f"{now - step_timer['last']}\n")
+            step_timer["last"] = now
+
+        dyn.attach(_write_frame,       interval=interval)
+        dyn.attach(_write_frame_small, interval=small_interval)
+        dyn.attach(_write_time,        interval=1)
+
+        dyn.run(total_steps)
+        logger.info("MD finished.")
+
+        # Remove PAUSE sentinel if present
+        pause = Path("PAUSE")
+        if pause.exists():
+            pause.unlink()
+
+        with open("md_out.time", "a") as f:
+            f.write(f"{time.time() - initial_time}\n")
+
+    @staticmethod
+    def _build_thermostat(name: str, atoms, timestep, temperature, friction, params):
+        """Return the appropriate ASE MD integrator."""
+        from ase import units
+
+        logfile = "md_out.log"
+        if name == "Langevin":
+            from ase.md.langevin import Langevin
+            return Langevin(atoms, timestep, temperature_K=temperature,
+                            friction=friction, logfile=logfile)
+        if name == "NoseHooverChain":
+            from ase.md.nose_hoover_chain import NoseHooverChainNVT
+            return NoseHooverChainNVT(atoms, timestep, temperature_K=temperature,
+                                      tdamp=50 * units.fs, tchain=4, logfile=logfile)
+        if name == "Berendsen":
+            from ase.md.berendsen import Berendsen
+            tau = params.get("tau", 25 * timestep)
+            return Berendsen(atoms, timestep, temperature_K=temperature,
+                             taut=tau, logfile=logfile)
+        if name == "VelocityVerlet":
+            from ase.md.velocityverlet import VelocityVerlet
+            return VelocityVerlet(atoms, timestep, logfile=logfile)
+        raise ValueError(f"Unknown thermostat: '{name}'")
+
+    # ------------------------------------------------------------------
+    # Minimisation
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def run_minimization(
+        model_path: str | Path,
+        md_params: str | Path,
+        type: str = "local",
+    ) -> None:
+        """
+        Run BFGS geometry minimisation using ASE + MACE.
+
+        Parameters
+        ----------
+        model_path : str or Path
+            Path to the trained MACE model.
+        md_params : str or Path
+            JSON file with keys: ``cell``, ``max_steps`` (int, default 1000),
+            ``fmax`` (float, default 0.01 eV/Å), ``interval`` (int, default 1).
+        type : {"local"}
+            Only "local" is currently implemented.
+        """
+        from ase.io import read
+        from ase.optimize import BFGS
+        from mace.calculators import MACECalculator
+
+        if type != "local":
+            raise NotImplementedError(f"Minimisation type '{type}' is not yet implemented.")
+
+        model_path = Path(model_path)
+        with open(md_params) as f:
+            params = json.load(f)
+
+        init_conf = read("coord.xyz", 0)
+
+        if "cell" in params:
+            init_conf.cell = np.diag(np.array(params["cell"], dtype=float))
+            init_conf.center()
+            init_conf.set_pbc(True)
+        elif init_conf.cell is not None and init_conf.cell.any():
+            init_conf.set_pbc(True)
+        else:
+            raise ValueError("Cell parameters missing.")
+
+        init_conf.calc = MACECalculator(model_paths=model_path, device="cuda")
+
+        max_steps = int(params.get("max_steps", 1000))
+        fmax      = float(params.get("fmax", 0.01))
+        interval  = int(params.get("interval", 1))
+
+        dyn = BFGS(init_conf, trajectory="minimization.traj")
+        dyn.attach(lambda: dyn.atoms.write("md_out.xyz", append=True), interval=interval)
+        dyn.run(fmax=fmax, steps=max_steps)
+        logger.info("Minimisation finished.")
+
+    # ------------------------------------------------------------------
+    # Evaluation
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def evaluate(
+        model_path: str | Path,
+        input_file: str | Path,
+        output_file: str | Path,
+        type: str = "local",
+    ) -> list[tuple[float, np.ndarray]]:
+        """
+        Run a trained MACE model on all structures in ``input_file`` and write
+        predicted energies and forces to ``output_file``.
+
+        Parameters
+        ----------
+        model_path : str or Path
+        input_file : str or Path
+            Extended XYZ file with one or more structures.
+        output_file : str or Path
+            Output extended XYZ with predictions stored in info/arrays.
+        type : {"local"}
+
+        Returns
+        -------
+        list of (energy, forces) tuples for each structure.
+        """
         from ase.io import read, write
         from mace.calculators import MACECalculator
-        from ase import Atoms
-        import copy
 
-        if type == "local":
-            try:
-                model_path = model_path if isinstance(model_path, Path) else Path(model_path)
-            except Exception as e:
-                raise ValueError(f"Invalid model path: {model_path}") from e
+        if type != "local":
+            raise NotImplementedError(f"Evaluation type '{type}' is not yet implemented.")
 
-        elif type == "universal":
-            raise NotImplementedError("Universal type evaluation is not implemented yet.")
-        
-        structures = read(input_file, ':')
-        calculator = MACECalculator(model_paths= model_path, device='cuda')
+        model_path = Path(model_path)
+        calculator = MACECalculator(model_paths=model_path, device="cuda")
+        structures = read(str(input_file), ":")
+
+        results: list[tuple[float, np.ndarray]] = []
         new_structures = []
-        results = []
+
         for i, atoms in enumerate(structures):
             atoms.calc = calculator
             energy = atoms.get_potential_energy()
             forces = atoms.get_forces()
+
             if len(atoms) != forces.shape[0]:
-                raise ValueError(f"Number of atoms ({len(atoms)}) does not match number of forces ({forces.shape[0]}).")
-            atoms.info['predicted_energy'] = energy
-            atoms.arrays['predicted_forces'] = forces
+                raise ValueError(
+                    f"Structure {i}: atom count ({len(atoms)}) ≠ force rows ({forces.shape[0]})."
+                )
+
+            atoms.info["predicted_energy"]   = energy
+            atoms.arrays["predicted_forces"] = forces
             new_structures.append(atoms.copy())
             results.append((energy, forces))
-            print(f"Structure {i}: Energy = {energy} eV")
-            # break
+            logger.debug(f"Structure {i}: energy = {energy:.4f} eV")
 
-        write(output_file, new_structures)
-        print(f"Results written to {output_file}")
+        write(str(output_file), new_structures)
+        logger.info(f"Wrote {len(new_structures)} structures → {output_file}")
         return results
 
-# --- Factory helper ---
-def create_mlp(method,*args, **kwargs):
+
+# ---------------------------------------------------------------------------
+# Factory helper
+# ---------------------------------------------------------------------------
+
+def create_mlp(method: str, *args, **kwargs) -> MLP:
+    """
+    Instantiate an MLP wrapper by name.
+
+    Parameters
+    ----------
+    method : {"mace"}
+        The MLP type to create.
+    *args, **kwargs :
+        Passed to the implementation's ``__init__``.
+    """
     if method.lower() == "mace":
         return MACE_MLP(*args, **kwargs)
-    else:
-        raise ValueError(f"Unknown method: {method}")
+    raise ValueError(f"Unknown MLP method: '{method}'. Available: ['mace']")
 
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     import argparse
-    import inspect
-    p = argparse.ArgumentParser()
 
-    # pick which method
-    p.add_argument("--method", choices=["run_md","run_minimization","evaluate"], nargs="?")
+    p = argparse.ArgumentParser(description="MACE MLP utilities.")
+    p.add_argument(
+        "--method",
+        choices=["run_md", "run_minimization", "evaluate"],
+        required=True,
+    )
     args, remaining = p.parse_known_args()
-    logger.debug(f"Arguments: {args}, Remaining: {remaining}")
-    if args.method:
-        # fallback / default behavior
 
-        # otherwise run the selected static method
-        fn = getattr(MACE_MLP, args.method, None)
-        if fn:
-            # get the function
-            fn = getattr(MACE_MLP, args.method)
+    fn = getattr(MACE_MLP, args.method, None)
+    if fn is None:
+        logger.error(f"Unknown method: {args.method}")
+        sys.exit(1)
 
-            # inspect args
-            sig = inspect.signature(fn)
-
-            # build dynamic parser for this method
-            p2 = argparse.ArgumentParser()
-            for name, param in sig.parameters.items():
-                if param.default is inspect._empty:
-                    p2.add_argument(f"--{name}", required=True)
-                else:
-                    p2.add_argument(f"--{name}", default=param.default)
-
-            args2 = p2.parse_args(remaining)
-
-            # call function
-            kwargs = vars(args2)
-            out = fn(**kwargs)
+    sig = inspect.signature(fn)
+    p2 = argparse.ArgumentParser()
+    for name, param in sig.parameters.items():
+        if param.default is inspect.Parameter.empty:
+            p2.add_argument(f"--{name}", required=True)
         else:
-            print(f"unknown method: {args.method}")
-            exit(1)
-    else:
-        print("no method given → running default stuff")
-        # REMOVE BELOW: example usage
-        # mlp = create_mlp("mace", "train.yaml",
-        #                 E0s={1: -13.52638614, 6: -145.7828756, 8: -429.0792406, 29: -1303.851651})
-        # mlp.train(train_file="train.xyz", test_file="test.xyz", seeds=[123, 234, 345], prepare_only=True,absolute_paths=True)
+            p2.add_argument(f"--{name}", default=param.default)
 
+    fn(**vars(p2.parse_args(remaining)))

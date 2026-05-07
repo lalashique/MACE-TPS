@@ -1,517 +1,829 @@
-# from mlp import create_mlp
-# from tps import TPS_setup, Sampler
+"""
+workflow.py — Active learning workflow for MLP-driven TPS simulations.
+
+Orchestrates the iterative loop:
+    DFT → MLP training → TPS sampling → frame selection → repeat
+
+Each generation lives in its own subdirectory:
+    <workdir>/
+        0/
+            dft/         ← CP2K inputs + outputs
+            mlp/         ← MACE training runs
+            tps/         ← OPS storage + sampled trajectories
+            DONE         ← sentinel: this generation is complete
+        1/
+            ...
+        init/            ← initial coord files (updated each generation)
+        workflow_state.json
+
+Usage:
+    python workflow.py --config workflow.json
+    python workflow.py --config workflow.json --gen 2          # resume at generation 2
+    python workflow.py --config workflow.json --stage mlp      # run only one stage
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import subprocess as sp
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+from enum import Enum
+from pathlib import Path
+from typing import Optional
 
 from loguru import logger
-import json
-from pathlib import Path
-
-import os
-import subprocess as sp
-import shutil
-
-from util.traj_util import select_frames
-
-from ase.io import read, write
-import numpy as np
 
 
-def run_command(command, out=False):
-    if out == True:
+# ---------------------------------------------------------------------------
+# Enums
+# ---------------------------------------------------------------------------
+
+class StageStatus(str, Enum):
+    PENDING  = "pending"
+    RUNNING  = "running"
+    DONE     = "done"
+    SKIPPED  = "skipped"
+    FAILED   = "failed"
+
+
+class StageName(str, Enum):
+    DFT          = "dft"
+    MLP          = "mlp"
+    TPS          = "tps"
+    FRAME_SELECT = "frame_select"
+
+
+# ---------------------------------------------------------------------------
+# State dataclasses (serialised to JSON)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class StageState:
+    status: StageStatus = StageStatus.PENDING
+    notes: str = ""
+
+    def to_dict(self) -> dict:
+        return {"status": self.status.value, "notes": self.notes}
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "StageState":
+        return cls(
+            status=StageStatus(d.get("status", "pending")),
+            notes=d.get("notes", ""),
+        )
+
+
+@dataclass
+class GenerationState:
+    generation: int
+    stages: dict[str, StageState] = field(
+        default_factory=lambda: {s.value: StageState() for s in StageName}
+    )
+    done: bool = False
+
+    def to_dict(self) -> dict:
+        return {
+            "generation": self.generation,
+            "done": self.done,
+            "stages": {k: v.to_dict() for k, v in self.stages.items()},
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "GenerationState":
+        obj = cls(generation=d["generation"], done=d.get("done", False))
+        obj.stages = {k: StageState.from_dict(v) for k, v in d.get("stages", {}).items()}
+        return obj
+
+    def stage(self, name: StageName) -> StageState:
+        return self.stages.setdefault(name.value, StageState())
+
+    def mark(self, name: StageName, status: StageStatus, notes: str = "") -> None:
+        s = self.stages.setdefault(name.value, StageState())
+        s.status = status
+        s.notes = notes
+
+
+@dataclass
+class WorkflowState:
+    current_generation: int = 0
+    generations: dict[int, GenerationState] = field(default_factory=dict)
+
+    def to_dict(self) -> dict:
+        return {
+            "current_generation": self.current_generation,
+            "generations": {str(k): v.to_dict() for k, v in self.generations.items()},
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "WorkflowState":
+        obj = cls(current_generation=d.get("current_generation", 0))
+        obj.generations = {
+            int(k): GenerationState.from_dict(v)
+            for k, v in d.get("generations", {}).items()
+        }
+        return obj
+
+    def get_or_create_gen(self, gen: int) -> GenerationState:
+        if gen not in self.generations:
+            self.generations[gen] = GenerationState(generation=gen)
+        return self.generations[gen]
+
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+
+@dataclass
+class WorkflowConfig:
+    """
+    Mirrors the JSON config file. All fields have sensible defaults.
+
+    Minimal example JSON
+    --------------------
+    {
+        "workdir": ".",
+        "max_generations": 5,
+        "structures": ["init/coord.xyz"],
+        "top_file": "top.pdb",
+        "dft": {
+            "engine": "cp2k",
+            "input_files": ["cp2k.inp", "force_eval.inp"],
+            "settings": { "command": "mpirun -np 20 cp2k.popt" },
+            "workdir": "single_reftraj",
+            "reftraj": true,
+            "run_mode": "prepare"
+        },
+        "mlp": {
+            "config_file": "mlp.yaml",
+            "E0s": {"1": -13.5, "6": -145.7, "8": -428.9},
+            "seeds": [123, 234, 345],
+            "test_fraction": 0.25
+        },
+        "tps": {
+            "config_file": "tps.json",
+            "run_command": "cd {tps_dir} && python -m tps --start_type new"
+        },
+        "auto_confirm": {
+            "remove_pause": false,
+            "continue_generation": false,
+            "run_smd": false
+        }
+    }
+    """
+
+    workdir: Path
+    max_generations: int
+    structures: list[str]
+    top_file: str
+    dft: dict
+    mlp: dict
+    tps: dict
+    auto_confirm: dict
+    log_file: str = "workflow_debug.log"
+    state_file: str = "workflow_state.json"
+
+    @classmethod
+    def from_json(cls, path: str | Path) -> "WorkflowConfig":
+        with open(path) as f:
+            raw = json.load(f)
+
+        workdir = Path(raw.get("workdir", ".")).resolve()
+        auto_confirm_defaults = {
+            "remove_pause": False,
+            "continue_generation": False,
+            "run_smd": False,
+        }
+        auto_confirm = {**auto_confirm_defaults, **raw.get("auto_confirm", {})}
+
+        return cls(
+            workdir=workdir,
+            max_generations=raw.get("max_generations", 5),
+            structures=raw.get("structures", []),
+            top_file=raw.get("top_file", "top.pdb"),
+            dft=raw.get("dft", {}),
+            mlp=raw.get("mlp", {}),
+            tps=raw.get("tps", {}),
+            auto_confirm=auto_confirm,
+            log_file=raw.get("log_file", "workflow_debug.log"),
+            state_file=raw.get("state_file", "workflow_state.json"),
+        )
+
+    def confirm(self, key: str, prompt: str) -> bool:
+        """Return the auto-confirm value if set; otherwise ask the user."""
+        if key in self.auto_confirm:
+            answer = bool(self.auto_confirm[key])
+            logger.debug(f"[auto_confirm] {key} = {answer}  (prompt: '{prompt}')")
+            return answer
+        return input(f"{prompt} (y/N): ").strip().lower() == "y"
+
+
+# ---------------------------------------------------------------------------
+# Abstract stage base
+# ---------------------------------------------------------------------------
+
+class Stage(ABC):
+    """Base class for a single workflow stage within one generation."""
+
+    name: StageName  # must be set by each subclass
+
+    def __init__(self, gen: int, config: WorkflowConfig, state: GenerationState):
+        self.gen = gen
+        self.config = config
+        self.gen_state = state
+        self.gen_dir = config.workdir / str(gen)
+        self.init_dir = config.workdir / "init"
+
+    @property
+    def stage_state(self) -> StageState:
+        return self.gen_state.stage(self.name)
+
+    def is_done(self) -> bool:
+        return self.stage_state.status == StageStatus.DONE
+
+    def run(self) -> bool:
+        """
+        Entry point called by the generation runner.
+        Skips if already done. Returns True on success, False if blocked.
+        """
+        if self.is_done():
+            logger.info(f"[Gen {self.gen}][{self.name.value}] Already done — skipping.")
+            return True
+
+        logger.info(f"[Gen {self.gen}][{self.name.value}] Starting.")
+        self.gen_state.mark(self.name, StageStatus.RUNNING)
+
         try:
-            output = sp.check_output(command, shell=True)
-            output = output.decode("utf8").strip("/n")
-        except sp.CalledProcessError:
-            output = " "
-        return output
-    else:
-        return sp.call(command, shell=True)
+            result = self._run()
+        except Exception as exc:
+            logger.error(f"[Gen {self.gen}][{self.name.value}] FAILED: {exc}")
+            self.gen_state.mark(self.name, StageStatus.FAILED, str(exc))
+            raise
+
+        if result:
+            self.gen_state.mark(self.name, StageStatus.DONE)
+            logger.info(f"[Gen {self.gen}][{self.name.value}] Done.")
+        else:
+            self.gen_state.mark(
+                self.name, StageStatus.PENDING,
+                "Blocked — external action required."
+            )
+            logger.info(f"[Gen {self.gen}][{self.name.value}] Blocked; manual step needed.")
+
+        return result
+
+    @abstractmethod
+    def _run(self) -> bool:
+        """Stage logic. Return True if complete, False if blocked on an external step."""
+        ...
+
+    # ------------------------------------------------------------------
+    # Shared helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _copy(src: Path, dst: Path) -> None:
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
+        logger.debug(f"Copied {src} → {dst}")
+
+    @staticmethod
+    def _touch_done(directory: Path) -> None:
+        (directory / "DONE").touch()
+
+    @staticmethod
+    def run_cmd(cmd: str, capture: bool = False) -> str | int:
+        if capture:
+            try:
+                return sp.check_output(cmd, shell=True).decode().strip()
+            except sp.CalledProcessError:
+                return ""
+        return sp.call(cmd, shell=True)
+
+
+# ---------------------------------------------------------------------------
+# DFT Stage
+# ---------------------------------------------------------------------------
+
+class DFTStage(Stage):
+    name = StageName.DFT
+
+    def _run(self) -> bool:
+        from dft import DFTFactory
+
+        cfg = self.config.dft
+        dft_dir = self.gen_dir / "dft"
+        dft_dir.mkdir(parents=True, exist_ok=True)
+
+        input_files = [str((self.config.workdir / f).resolve()) for f in cfg.get("input_files", [])]
+
+        dft_engine = DFTFactory.create(
+            engine=cfg.get("engine", "cp2k"),
+            settings=cfg.get("settings", {}),
+            input_files=input_files,
+            reftraj=cfg.get("reftraj", True),
+            run_mode=cfg.get("run_mode", "prepare"),
+            workdir=str(dft_dir / cfg.get("workdir", "single_reftraj")),
+        )
+
+        # Resolve structures for this generation
+        if self.gen == 0:
+            structures = [str((self.config.workdir / s).resolve()) for s in self.config.structures]
+        else:
+            coord = self.init_dir / "coord.xyz"
+            if not coord.exists():
+                raise FileNotFoundError(f"coord.xyz not found: {coord}")
+            structures = [str(coord.resolve())]
+
+        state_file = Path(dft_engine.workdir) / "state.json"
+
+        # --- Prepare inputs if not done yet ---
+        if not state_file.exists():
+            logger.info(f"[DFT] Preparing inputs in {dft_engine.workdir}")
+            dft_engine.run(structures)
+            cmd = cfg.get("settings", {}).get("command", "cp2k")
+            inp = input_files[0] if input_files else "cp2k.inp"
+            logger.info(f"[DFT] Run CP2K in each structure folder:\n"
+                        f"  cd <structure_folder> && {cmd} -i {inp} -o cp2k.out")
+            return False
+
+        # --- Check completion of each structure ---
+        dft_engine.state = dft_engine._load_state()
+        all_complete = True
+
+        for key in dft_engine.state:
+            if "structure_" not in key:
+                continue
+            struct_dir = Path(dft_engine.workdir) / key
+            out_xyz   = struct_dir / "cp2k-pos-1.xyz"
+            coord_xyz = struct_dir / "coord.xyz"
+            pause     = struct_dir / "PAUSE"
+
+            if not out_xyz.exists():
+                logger.warning(f"[DFT] Output missing: {out_xyz}")
+                all_complete = False
+                continue
+
+            out_lines   = self.run_cmd(f"wc -l {out_xyz}", capture=True).split()[0]
+            coord_lines = self.run_cmd(f"wc -l {coord_xyz}", capture=True).split()[0]
+
+            if out_lines == coord_lines:
+                if pause.exists() and self.config.confirm(
+                    "remove_pause", f"DFT complete for {key}. Remove PAUSE file?"
+                ):
+                    pause.unlink()
+                    logger.info(f"[DFT] Removed PAUSE for {key}.")
+            else:
+                logger.warning(f"[DFT] {key} not complete ({out_lines}/{coord_lines} lines).")
+                all_complete = False
+
+        if not all_complete:
+            return False
+
+        # --- Parse outputs and combine ---
+        logger.info("[DFT] All calculations done — parsing outputs.")
+        dft_engine._parse_outputs()
+
+        dft_workdir = Path(dft_engine.workdir)
+        combined = dft_workdir / "output" / "combined_extdata.xyz"
+        combined.parent.mkdir(parents=True, exist_ok=True)
+
+        with open(combined, "wb") as dst:
+            for src in sorted(dft_workdir.glob("structure_*/extdata.xyz")):
+                with open(src, "rb") as s:
+                    shutil.copyfileobj(s, dst)
+
+        logger.info(f"[DFT] Combined extxyz → {combined}")
+        self._touch_done(dft_dir)
+        return True
+
+
+# ---------------------------------------------------------------------------
+# MLP Stage
+# ---------------------------------------------------------------------------
+
+class MLPStage(Stage):
+    name = StageName.MLP
+
+    def _run(self) -> bool:
+        import yaml
+        from mlp import create_mlp
+        import util.traj_util as tu
+
+        cfg = self.config.mlp
+        mlp_dir = self.gen_dir / "mlp"
+        mlp_dir.mkdir(parents=True, exist_ok=True)
+
+        # Locate DFT combined output
+        dft_combined = (
+            self.gen_dir / "dft" /
+            self.config.dft.get("workdir", "single_reftraj") /
+            "output" / "combined_extdata.xyz"
+        )
+        if not dft_combined.exists():
+            raise FileNotFoundError(f"[MLP] DFT output not found: {dft_combined}")
+
+        # Copy + split data (idempotent)
+        data_dir = mlp_dir / "data"
+        data_dir.mkdir(parents=True, exist_ok=True)
+        dest = data_dir / "combined_extdata.xyz"
+        if not dest.exists():
+            self._copy(dft_combined, dest)
+            logger.info("[MLP] Splitting data into train/test sets.")
+            tu.train_test_split(str(dest), test_fraction=cfg.get("test_fraction", 0.25))
+
+        train_file = data_dir / "train.xyz"
+        test_file  = data_dir / "test.xyz"
+
+        # Write train YAML config (idempotent)
+        train_yaml = mlp_dir / "train.yaml"
+        if not train_yaml.exists():
+            src_yaml = self.config.workdir / cfg.get("config_file", "mlp.yaml")
+            if src_yaml.exists():
+                self._copy(src_yaml, train_yaml)
+            else:
+                with open(train_yaml, "w") as f:
+                    yaml.safe_dump(cfg, f)
+
+        # Validate E0s
+        E0s = cfg.get("E0s")
+        if not E0s:
+            raise ValueError("[MLP] E0s must be provided in the mlp config section.")
+        E0s = {int(k): float(v) for k, v in E0s.items()}
+
+        seeds = cfg.get("seeds", [123, 234, 345])
+        orig_dir = Path.cwd()
+        os.chdir(mlp_dir)
+        try:
+            mlp = create_mlp("mace", str(train_yaml), E0s=E0s)
+            mlp.train(
+                train_file=str(train_file.resolve()),
+                test_file=str(test_file.resolve()),
+                seeds=seeds,
+                prepare_only=True,
+                absolute_paths=True,
+            )
+        finally:
+            os.chdir(orig_dir)
+
+        logger.info("[MLP] Training configs written. Submit jobs and rerun when complete.")
+
+        # Check for completion (models exist, no PAUSE files blocking)
+        runs_dir = mlp_dir / "runs"
+        pause_files = list(runs_dir.glob("committee_*/PAUSE"))
+        all_trained = True
+
+        for pause in pause_files:
+            committee_dir = pause.parent
+            mace_dir = committee_dir / "MACE_models"
+            model = next(mace_dir.glob("*.model"), None) if mace_dir.exists() else None
+            if model:
+                if self.config.confirm(
+                    "remove_pause",
+                    f"Model found at {model.name}. Remove PAUSE file at {pause}?"
+                ):
+                    pause.unlink()
+                    logger.info(f"[MLP] Removed PAUSE: {pause}")
+            else:
+                logger.warning(f"[MLP] No model in {committee_dir} — training incomplete.")
+                all_trained = False
+
+        if not all_trained:
+            return False
+
+        model_files = (
+            list(runs_dir.glob("committee_*/MACE_models/*.model")) +
+            list(runs_dir.glob("committee_*/*.model"))
+        )
+        if not model_files:
+            logger.warning("[MLP] No trained models found yet.")
+            return False
+
+        logger.info(f"[MLP] {len(model_files)} model(s) ready.")
+        self._touch_done(mlp_dir)
+        return True
+
+
+# ---------------------------------------------------------------------------
+# TPS Stage
+# ---------------------------------------------------------------------------
+
+class TPSStage(Stage):
+    name = StageName.TPS
+
+    def _run(self) -> bool:
+        cfg = self.config.tps
+        tps_dir = self.gen_dir / "tps"
+        tps_dir.mkdir(parents=True, exist_ok=True)
+
+        # --- Gather model paths ---
+        mlp_runs = self.gen_dir / "mlp" / "runs"
+        models_dir = tps_dir / "models"
+        models_dir.mkdir(parents=True, exist_ok=True)
+        model_paths: list[str] = []
+
+        for committee in sorted(mlp_runs.glob("committee_*")):
+            mace_dir = committee / "MACE_models"
+            src = next(
+                (list(mace_dir.glob("*.model")) if mace_dir.exists() else []) +
+                list(committee.glob("*.model")),
+                None,
+            )
+            if src:
+                dst = models_dir / f"{committee.name}_{src.name}"
+                if not dst.exists():
+                    self._copy(src, dst)
+                model_paths.append(str(dst))
+
+        if not model_paths:
+            raise FileNotFoundError(f"[TPS] No trained models found in {mlp_runs}")
+        logger.info(f"[TPS] {len(model_paths)} model(s) available.")
+
+        # --- SMD: generate initial path if needed ---
+        tps_xyz = self.config.workdir / "tps.xyz"
+        if not tps_xyz.exists():
+            smd_dir = tps_dir / "smd"
+            smd_dir.mkdir(parents=True, exist_ok=True)
+
+            required = {"smd.json": "smd.json", "smd.xyz": "coord.xyz", "plumed.dat": "plumed.dat"}
+            for fname, dest_name in required.items():
+                src = self.config.workdir / fname
+                dst = smd_dir / dest_name
+                if not src.exists():
+                    raise FileNotFoundError(f"[SMD] Required file not found: {src}")
+                if not dst.exists():
+                    self._copy(src, dst)
+
+            smd_cmd = (
+                f"cd {smd_dir} && mlp run_md "
+                f"--model_path {model_paths[0]} "
+                f"--md_params smd.json "
+                f"--plumed plumed.dat"
+            )
+            logger.info(f"[SMD] Run command:\n  {smd_cmd}")
+
+            if self.config.confirm("run_smd", "Run SMD now?"):
+                self.run_cmd(smd_cmd)
+
+            if not tps_xyz.exists():
+                logger.info(f"[SMD] Copy the result trajectory to {tps_xyz} and rerun.")
+                return False
+
+        # --- Prepare TPS directory ---
+        tps_json_src = self.config.workdir / cfg.get("config_file", "tps.json")
+        if not tps_json_src.exists():
+            raise FileNotFoundError(f"[TPS] Config not found: {tps_json_src}")
+
+        # Write tps.json with updated model paths (always refresh)
+        with open(tps_json_src) as f:
+            tps_config = json.load(f)
+        tps_config["mace_model_path"] = model_paths
+        tps_json_dst = tps_dir / "tps.json"
+        with open(tps_json_dst, "w") as f:
+            json.dump(tps_config, f, indent=4)
+        logger.info("[TPS] Written tps.json with current model paths.")
+
+        for src_path, dst_name in [
+            (tps_xyz, "tps.xyz"),
+            (self.config.workdir / self.config.top_file, "top.pdb"),
+        ]:
+            dst = tps_dir / dst_name
+            if not dst.exists():
+                self._copy(Path(src_path), dst)
+
+        # Provide the run command
+        run_cmd = cfg.get("run_command", f"cd {tps_dir} && python -m tps --start_type new")
+        logger.info(f"[TPS] Run command:\n  {run_cmd}")
+
+        if not self.config.confirm("continue_generation", "Continue after TPS sampler?"):
+            return False
+
+        # Verify output exists
+        traj_folder = tps_dir / "traj"
+        extend_folder = traj_folder / "extend"
+        if not extend_folder.exists():
+            logger.warning("[TPS] Extend folder not found — run TPS and extension first.")
+            return False
+
+        self._touch_done(tps_dir)
+        return True
+
+
+# ---------------------------------------------------------------------------
+# Frame Selection Stage
+# ---------------------------------------------------------------------------
+
+class FrameSelectStage(Stage):
+    name = StageName.FRAME_SELECT
+
+    def _run(self) -> bool:
+        from util.traj_util import select_frames
+
+        tps_dir    = self.gen_dir / "tps"
+        extend_dir = tps_dir / "traj" / "extend"
+        output_dir = tps_dir / "output"
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        if not extend_dir.exists():
+            raise FileNotFoundError(f"[FrameSelect] Extend folder not found: {extend_dir}")
+
+        with open(tps_dir / "tps.json") as f:
+            tps_params = json.load(f)
+
+        # Combine extended trajectories
+        extended_files = sorted(extend_dir.glob("*_extended.xyz"))
+        if not extended_files:
+            raise FileNotFoundError(f"[FrameSelect] No *_extended.xyz files in {extend_dir}")
+
+        combined = output_dir / "tps_all_extended.xyz"
+        logger.info(f"[FrameSelect] Combining {len(extended_files)} trajectories...")
+        with open(combined, "wb") as dst:
+            for src in extended_files:
+                with open(src, "rb") as s:
+                    shutil.copyfileobj(s, dst)
+
+        # Frame selection
+        out_file = output_dir / "tps_selected_frames.xyz"
+        logger.info("[FrameSelect] Selecting high-uncertainty frames...")
+        select_frames(xyz_path=str(combined), tps_params=tps_params, out_file=str(out_file))
+        logger.info(f"[FrameSelect] Selected frames → {out_file}")
+
+        # Archive for reference
+        final = self.config.workdir / str(self.gen) / f"gen_{self.gen}_selected_frames.xyz"
+        self._copy(out_file, final)
+
+        # Backup init/ and update coord.xyz for the next generation
+        backup = self.config.workdir / str(self.gen) / "init"
+        try:
+            if not backup.exists():
+                shutil.copytree(self.init_dir, backup)
+                logger.info(f"[FrameSelect] Backed up init/ → {backup}")
+        except Exception as exc:
+            logger.warning(f"[FrameSelect] Could not back up init/: {exc}")
+
+        for old in self.init_dir.glob("*.xyz"):
+            old.unlink()
+        self._copy(final, self.init_dir / "coord.xyz")
+        logger.info(f"[FrameSelect] Updated init/coord.xyz for generation {self.gen + 1}.")
+
+        return True
+
+
+# ---------------------------------------------------------------------------
+# Generation runner
+# ---------------------------------------------------------------------------
+
+class Generation:
+    """Runs all stages for a single generation in order."""
+
+    STAGES: list[type[Stage]] = [DFTStage, MLPStage, TPSStage, FrameSelectStage]
+
+    def __init__(self, gen: int, config: WorkflowConfig, state: GenerationState):
+        self.gen = gen
+        self.config = config
+        self.gen_state = state
+        self.gen_dir = config.workdir / str(gen)
+        self.gen_dir.mkdir(parents=True, exist_ok=True)
+
+    def run(self, only_stage: Optional[StageName] = None) -> bool:
+        """
+        Execute all stages in order (or just `only_stage` if given).
+        Returns True when the generation is fully complete.
+        """
+        for StageClass in self.STAGES:
+            stage = StageClass(self.gen, self.config, self.gen_state)
+
+            if only_stage and stage.name != only_stage:
+                continue
+
+            if not stage.run():
+                logger.info(
+                    f"[Gen {self.gen}] Halted at '{stage.name.value}'. "
+                    "Rerun after completing the required manual step."
+                )
+                return False
+
+        if not only_stage:
+            self.gen_state.done = True
+            (self.gen_dir / "DONE").touch()
+            logger.info(f"[Gen {self.gen}] Complete.")
+
+        return True
+
+
+# ---------------------------------------------------------------------------
+# Main Workflow
+# ---------------------------------------------------------------------------
+
+class Workflow:
+    """
+    Top-level controller. Loads config + state, iterates over generations.
+
+    Parameters
+    ----------
+    config_path : path to the JSON config file
+    start_gen   : generation to start from (overrides saved state)
+    only_stage  : run only this stage name for pending generations
+    """
+
+    def __init__(
+        self,
+        config_path: str | Path,
+        start_gen: Optional[int] = None,
+        only_stage: Optional[str] = None,
+    ):
+        self.config = WorkflowConfig.from_json(config_path)
+        self.state_path = self.config.workdir / self.config.state_file
+        self.state = self._load_state()
+        self.start_gen = start_gen if start_gen is not None else self.state.current_generation
+        self.only_stage = StageName(only_stage) if only_stage else None
+
+        (self.config.workdir / "init").mkdir(parents=True, exist_ok=True)
+
+        logger.add(
+            self.config.workdir / self.config.log_file,
+            level="DEBUG",
+            rotation="10 MB",
+        )
+
+    # ------------------------------------------------------------------
+    # State persistence
+    # ------------------------------------------------------------------
+
+    def _load_state(self) -> WorkflowState:
+        if self.state_path.exists():
+            with open(self.state_path) as f:
+                return WorkflowState.from_dict(json.load(f))
+        return WorkflowState()
+
+    def _save_state(self) -> None:
+        self.state_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.state_path, "w") as f:
+            json.dump(self.state.to_dict(), f, indent=2)
+        logger.debug(f"State saved → {self.state_path}")
+
+    # ------------------------------------------------------------------
+    # Run
+    # ------------------------------------------------------------------
+
+    def run(self) -> None:
+        logger.info(
+            f"Workflow starting | workdir={self.config.workdir} | "
+            f"max_gen={self.config.max_generations} | start_gen={self.start_gen}"
+        )
+
+        for gen_idx in range(self.start_gen, self.config.max_generations):
+            gen_state = self.state.get_or_create_gen(gen_idx)
+
+            if gen_state.done and not self.only_stage:
+                logger.info(f"[Gen {gen_idx}] Already complete — skipping.")
+                continue
+
+            logger.info(f"{'=' * 60}")
+            logger.info(f"  Generation {gen_idx}")
+            logger.info(f"{'=' * 60}")
+
+            self.state.current_generation = gen_idx
+            self._save_state()
+
+            generation = Generation(gen_idx, self.config, gen_state)
+            completed = generation.run(only_stage=self.only_stage)
+            self._save_state()
+
+            if not completed:
+                logger.info("Workflow paused — resolve the blocked stage and rerun.")
+                return
+
+            # Prompt (or auto-confirm) before advancing
+            if not self.config.confirm(
+                "continue_generation",
+                f"Generation {gen_idx} complete. Continue to generation {gen_idx + 1}?",
+            ):
+                logger.info("Stopping at user request.")
+                return
+
+            self.state.current_generation = gen_idx + 1
+            self._save_state()
+
+        logger.info("All generations complete.")
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    logger.add("workflow_debug.log", level="DEBUG")
+    import argparse
 
-    dft_json_loc = "dft.json"  # Placeholder for actual DFT config file
+    p = argparse.ArgumentParser(description="MLPath active-learning workflow.")
+    p.add_argument("--config", required=True, help="Path to workflow JSON config file.")
+    p.add_argument("--gen", type=int, default=None,
+                   help="Override starting generation (default: resume from saved state).")
+    p.add_argument("--stage", type=str, default=None,
+                   choices=[s.value for s in StageName],
+                   help="Run only this stage for the current generation.")
+    args = p.parse_args()
 
-    
-
-
-    dft_json_loc = Path(dft_json_loc).resolve()
-    logger.debug(f"[DFT] Reading DFT json file from {dft_json_loc}")
-    
-    with open(dft_json_loc, "r") as f:
-        try:
-            dft_config = json.load(f)
-        except json.JSONDecodeError as e:
-            logger.error(f"Error decoding JSON from {dft_json_loc}: {e}")
-            raise
-    engine = dft_config.get("engine")
-    settings = dft_config.get("settings")
-    input_files = [Path(file).resolve() for file in  dft_config.get("input_files", [])]
-    run_mode = dft_config.get("run_mode", "run")
-
-    init_dir = Path(os.getcwd()).resolve()
-    logger.debug(f"Initial working directory: {init_dir}")
-    gen = 0
-    while True:
-        # check if done file exists in init_dir/gen
-        done_file_gen = Path(init_dir) / str(gen) / "DONE"
-        if not done_file_gen.exists():
-            #  make folder name gen 
-            os.makedirs(str(gen), exist_ok=True)
-            logger.debug(f"Created directory for generation {gen}")
-            os.chdir(str(gen))
-            logger.debug(f"Changed working directory to: {os.getcwd()}")
-
-            logger.debug("[DFT WORKFLOW] Starting DFT workflow...")
-
-            os.makedirs("dft", exist_ok=True)
-            os.chdir("dft")
-            logger.debug(f"[DFT] Changed working directory to: {os.getcwd()}")
-            # check for DONE file in dft folder
-            done_file = Path("DONE").resolve()
-            logger.debug(f"[DFT WORKFLOW] Checking for DONE file at {done_file}")
-            dft_workdir = dft_config.get("workdir",os.getcwd())
-            if not done_file.exists():
-
-                logger.debug(f"[DFT] DFT Config: {dft_config}")
-                logger.debug("[DFT] Creating DFT engine...")
-
-
-                from dft import DFTFactory
-
-                dft_engine = DFTFactory.create(
-                        engine=engine,
-                        settings=settings,
-                        input_files = input_files,
-                        reftraj=True,
-                        run_mode=run_mode,
-                        workdir=dft_workdir
-                    )
-                logger.debug("[DFT] DFT engine created.")
-                if gen==0:
-                    structures = dft_config.get("structures")  # Placeholder for actual structures
-                    logger.debug(f"[DFT] DFT Engine Running on {structures}...")
-                    structures = [Path(init_dir/ struct).resolve() for struct in structures]
-                    # check the number of frames in the structures files if more than 1 continue
-                    # total_frames = 0
-                    for struct in structures:
-                        frames = len(read(struct, index=":"))
-                        if frames == 1:
-                            logger.info(f"[DFT WORKFLOW] run extension using mlp run_md ")
-                else:
-                    structures = init_dir/"init"/"coord.xyz"
-                    logger.debug(f"[DFT] DFT Engine Running on {structures}...")
-                    #split coord.xyz to multiple for parallel dft calculations after asking how many splits
-                    num_splits = int(input("Enter the number of splits for parallel DFT calculations: "))
-                    # read coord.xyz using ase
-                    all_frames = read(structures, index=":")
-                    total_frames = len(all_frames)  
-                    frames_per_split = total_frames // num_splits
-                    # save splits to init_dir as coord{i}.xyz
-                    for i in range(num_splits):
-                        write(init_dir/"init"/f"coord{i}.xyz", all_frames[i*frames_per_split:(i+1)*frames_per_split])
-                    structures = [init_dir/"init"/f"coord{i}.xyz" for i in range(num_splits)]
-                logger.debug(f"[DFT] Structures for DFT: {structures}")
-
-                # look for dft.json in the current directory
-                dft_json_current = Path("state.json").resolve()
-                logger.debug(f"[DFT] Looking for dft.json in current directory: {dft_json_current}")
-                if not dft_json_current.exists():
-                    dft_engine.run(structures)
-                    for key in dft_engine.state:
-                        if "structure_" in key:
-                            logger.debug(f"Structure: {key}, State: {dft_engine.state[key]}")
-                    logger.debug("[DFT] DFT set up complete.")
-                    logger.debug("Please run the DFT calculations in the respective structure folders and then rerun this workflow script to continue.")
-                    exit(0)
-                else:
-                    logger.debug(f"[DFT] dft.json already exists in current directory. Skipping DFT setup.")
-                    logger.debug("[DFT] Loading previous DFT state. and checking if calculations are complete.")
-                    dft_engine.state = dft_engine._load_state()
-                for key in dft_engine.state:
-                    logger.debug(f"Structure: {key}, State: {dft_engine.state[key]}")
-                    if "structure_" in key:
-                        # check if PAUSE file exists in the folder
-                        struct_folder = Path(dft_engine.workdir) / key
-                        pause_file = struct_folder / "PAUSE"
-                        logger.debug(f"Checking PAUSE file for {key} at {pause_file}")
-                        logger.debug(f"PAUSE file exists for {key}.")
-                        #check if cp2k-pos-1.out contains same amount of lines as coord.xyz usinge grep and wc -l
-                        coord_file = struct_folder / "coord.xyz"
-                        out_file = struct_folder / "cp2k-pos-1.xyz"
-
-                        if out_file.exists():
-                            out_num = run_command(f"wc -l {struct_folder / 'cp2k-pos-1.xyz'}", out=True).split(" ")[0]
-                            coord_num = run_command(f"wc -l {struct_folder / 'coord.xyz'}", out=True).split(" ")[0]
-                            logger.debug(f"Lines in output: {out_num}, Lines in coord: {coord_num}")
-
-                            # ask if want to remove PAUSE file if it exist
-                            if pause_file.exists() and out_num == coord_num:
-                                user_input = input(f"DFT calculation complete for {key}. Remove PAUSE file for {key}? (y/n): ")
-                                if user_input.lower() == 'y':
-                                    pause_file.unlink()
-                            elif out_num == coord_num:
-                                logger.debug(f"DFT calculation complete for {key}")
-                            else:
-                                logger.debug(f"DFT calculation not complete for {key}.")
-                                exit(0)
-                        else:
-                            logger.debug(f"Output file {out_file} does not exist yet. Please run the DFT calculation.")
-                            # print commands to run cp2k in the folder
-                            logger.info(f"To run DFT calculation, execute the following commands in {struct_folder}:\n cd {struct_folder} && {dft_engine.settings['command']} -i {dft_engine.input_files[0]} -o cp2k.out") 
-                            # raise FileNotFoundError(f"Output file {out_file} not found.")
-                            exit(0)
-            
-                dft_engine._parse_outputs()
-                logger.debug("[DFT] DFT output parsing complete.")
-                logger.debug("[DFT WORKFLOW] Combining the extxyz files into main directory...")
-
-                # logger.debug("[DFT Workflow] Copying DFT outputs to main directory...")
-                # copy all extxyz files from dft/workdir to init_dir/mlp/workdir
-
-                dft_workdir_path = Path(dft_engine.workdir).resolve()
-                dest_file = dft_workdir_path / "output" / "combined_extdata.xyz"
-                dest_file.parent.mkdir(parents=True, exist_ok=True)
-
-                # Option 1: Using shutil.copyfileobj (fastest for multiple files)
-                with open(dest_file, "wb") as dest_f:
-                    for extxyz_file in dft_workdir_path.glob("structure_*/extdata.xyz"):
-                        with open(extxyz_file, "rb") as src_f:
-                            shutil.copyfileobj(src_f, dest_f)
-
-                logger.debug(f"[MLP WORKFLOW] Combined extxyz files copied to {dest_file}")
-                # touch a DONE file in dft_workdir to indicate combining is done  
-                done_file = Path(dft_engine.workdir) / "DONE"
-                done_file.touch()
-                logger.debug(f"[DFT WORKFLOW] Created DONE file at {done_file}")
-            else:
-                logger.debug(f"[DFT WORKFLOW] DONE file exists in dft folder. Skipping DFT workflow.")
-                
-            logger.debug("Returning to initial directory...")
-            os.chdir(init_dir)
-            logger.debug(f"Current working directory: {os.getcwd()}")
-            logger.debug("DFT workflow complete.")
-
-
-            logger.debug("Starting MLP workflow...")
-            mlp_workdir = Path(init_dir) / str(gen) / "mlp"
-            mlp_workdir.mkdir(parents=True, exist_ok=True)
-
-            logger.debug("[MLP] Starting MLP Setup.")
-            os.chdir(mlp_workdir)
-
-            #check for DONE file in mlp folder
-            done_file = Path("DONE").resolve()
-            logger.debug(f"[MLP WORKFLOW] Checking for DONE file at {done_file}")
-            if not done_file.exists():
-                logger.debug("[MLP Workflow] Copying DFT outputs to MLP directory...")
-                # copy extxyz file from dft/output to mlp/data
-                mlp_workdir = Path(init_dir) / str(gen) / "mlp"
-                mlp_workdir.mkdir(parents=True, exist_ok=True)
-
-                mlp_json_loc = Path(mlp_workdir) / "mlp.json"
-
-                if not mlp_json_loc.exists():
-
-                    dest_file = mlp_workdir / "data" / "combined_extdata.xyz"
-                    dest_file.parent.mkdir(parents=True, exist_ok=True)
-                    dft_workdir_path = Path(dft_workdir).resolve()
-                    dft_output_path = dft_workdir_path / "output" / "combined_extdata.xyz"
-
-                    shutil.copyfile(dft_output_path, dest_file)
-
-
-                    logger.debug(f"[MLP WORKFLOW] Combined extxyz files copied to {dest_file}")
-                    import util.traj_util as tu
-                    logger.debug(f"[MLP WORKFLOW] Splitting data into train and test sets...")
-                    tu.train_test_split(str(dest_file), test_fraction=0.25)
-                    logger.debug(f"[MLP WORKFLOW] Data split into train and test sets. ")
-
-                    logger.debug(f"[MLP] Changed working directory to: {os.getcwd()}")
-                    # TODO : setup MLP json in the mlp_workdir to check if it was previously set up and then skip setup if so
-                    # check if mlp.json exists in mlp_workdir
-
-                    #read mlp.json file from init_dir
-                    mlp_json_loc = Path(init_dir) / "mlp.json"
-
-                    logger.debug(f"[MLP] Reading MLP json file from {mlp_json_loc}")
-                    with open(mlp_json_loc, "r") as f:
-                        try:
-                            mlp_config = json.load(f)
-                        except json.JSONDecodeError as e:
-                            logger.error(f"Error decoding JSON from {mlp_json_loc}: {e}")
-                            raise
-                    try:
-                        E0s = mlp_config["E0s"]
-                    except KeyError:
-                        logger.error("E0s not found in mlp.json")
-                        raise KeyError("E0s not found in mlp.json")
-
-                    logger.debug(f"[MLP] MLP Config: {mlp_config}")
-
-                    import yaml
-                    # convert mlp_config to yaml and save as train.yaml in mlp_workdir
-                    train_yaml_loc = mlp_workdir / "train.yaml"
-                    with open(train_yaml_loc, "w") as f:
-                        yaml.safe_dump(mlp_config, f)
-                    logger.debug(f"[MLP] MLP train.yaml saved to {train_yaml_loc}")
-
-                    logger.debug("[MLP] Creating MLP model...")    
-                    from mlp import create_mlp
-                    mlp = create_mlp("mace", "train.yaml", E0s=mlp_config["E0s"])
-                    mlp.train(train_file=str(dest_file.parent / "train.xyz"), test_file=str(dest_file.parent / "test.xyz"), seeds=[123, 234, 345], prepare_only=True,absolute_paths=True)
-                    logger.debug("[MLP] MLP model created and prepared for training.")
-                    exit(0)
-                else:
-                    logger.debug(f"[MLP WORKFLOW] mlp.json already exists in mlp folder. Skipping MLP setup.")
-                
-                # look for PAUSE files in mlp_workdir and remove them
-                for pause_file in mlp_workdir.glob("runs/committee_*/PAUSE"):
-                    logger.debug(f"PAUSE file: {pause_file}")
-                    if pause_file.exists():
-                        # look for MACE_models/mace01.model in the same committee folder
-                        committee_folder = pause_file.parent
-                        model_file = committee_folder / "MACE_models" / "mace01.model"
-                        if model_file.exists():
-                            logger.debug(f"Final Model file found: {model_file}")
-                            user_input = input(f"Remove PAUSE file at {pause_file}? (y/n): ")
-                            # if user_input.lower() == 'y':
-                            #     pause_file.unlink()
-                            #     logger.debug(f"Removed PAUSE file at {pause_file}")
-                        else:
-                            logger.debug(f"Final Model file not found: {model_file}. Keeping PAUSE file. Please complete training.")
-                            exit() 
-                    # touch a DONE file in mlp_workdir to indicate mlp setup is done
-                done_file = Path(mlp_workdir) / "DONE"
-                done_file.touch()
-            else:
-                logger.debug(f"[MLP WORKFLOW] DONE file exists in mlp folder. Skipping MLP workflow.")
-            logger.debug("MLP workflow complete.")
-
-            logger.debug("[TPS WORKFLOW] Starting TPS workflow...")
-            os.chdir(init_dir)
-            logger.debug(f"[TPS WORKFLOW] Changed working directory to: {os.getcwd()}")  
-            tps_workdir = Path(init_dir) / str(gen) / "tps"
-            tps_workdir.mkdir(parents=True, exist_ok=True)
-            os.chdir(tps_workdir)
-            logger.debug(f"[TPS WORKFLOW] Changed working directory to: {os.getcwd()}")
-            # check for DONE file in tps folder
-            done_file = Path("DONE").resolve()
-            logger.debug(f"[TPS WORKFLOW] Checking for DONE file at {done_file}")
-            if not done_file.exists():
-                logger.debug("Setting up TPS configuration...")
-                #copy all the models to tps_workdir/models
-                models_dir = tps_workdir / "models"
-                models_dir.mkdir(parents=True, exist_ok=True)
-                for committee_folder in (mlp_workdir / "runs").glob("committee_*"):
-                    model_file = committee_folder / "MACE_models" / "mace01.model"
-                    dest_file = models_dir / f"{committee_folder.name}_mace01.model"
-                    dest_file.write_bytes(model_file.read_bytes())
-                    logger.debug(f"[TPS WORKFLOW] Copied model {model_file} to {dest_file}")
-                #model path list
-                model_paths = [str(models_dir / f"{committee_folder.name}_mace01.model") for committee_folder in (mlp_workdir / "runs").glob("committee_*")]
-                logger.debug(f"[TPS WORKFLOW] Model paths for TPS: {model_paths}")
-                logger.debug(f"[TPS WORKFLOW] All models copied to {models_dir}")
-                logger.debug("[TPS WORKFLOW] Started Steered MD for initial path generation...")
-                smd_workdir = tps_workdir / "smd"
-                smd_workdir.mkdir(parents=True, exist_ok=True)
-                os.chdir(smd_workdir)
-                logger.debug(f"[SMD] Changed working directory to: {os.getcwd()}")
-                
-                #check if file exists smd.json in init_dir
-                if not (Path(init_dir) / "smd.json").exists():
-                    logger.error(f"[SMD] smd.json not found in {init_dir}. Cannot proceed with SMD setup.")
-                    raise FileNotFoundError(f"smd.json not found in {init_dir}")
-                source = Path(init_dir) / "smd.json"
-                dest = Path('smd.json')
-                dest.write_bytes(source.read_bytes())
-                logger.debug(f"[SMD] Copied smd.json to {dest}")
-
-                # check if smd.xyz exists in init_dir
-                if not (Path(init_dir) / "smd.xyz").exists():
-                    logger.error(f"[SMD] smd.xyz not found in {init_dir}. Cannot proceed with SMD setup.")
-                    raise FileNotFoundError(f"smd.xyz not found in {init_dir}. Cannot proceed with SMD setup.")
-                source = Path(init_dir) / "smd.xyz"
-                dest = Path('coord.xyz')
-                dest.write_bytes(source.read_bytes())
-                logger.debug(f"[SMD] Copied smd.xyz to {dest}")
-
-                # check if plumed.dat exists in init_dir
-                if not (Path(init_dir) / "plumed.dat").exists():
-                    logger.error(f"[SMD] plumed.dat not found in {init_dir}. Cannot proceed with SMD setup.")
-                    raise FileNotFoundError(f"plumed.dat not found in {init_dir}. Cannot proceed with SMD setup.")
-                source = Path(init_dir) / "plumed.dat"
-                dest = Path('plumed.dat')
-                dest.write_bytes(source.read_bytes())
-                logger.debug(f"[SMD] Copied plumed.dat to {dest}")
-
-                # ask if run SMD now
-                user_input = input(f"Run SMD now in {smd_workdir}? (y/N): ")
-                if user_input.lower() == 'y':
-                    logger.debug(f"[SMD] Exiting TPS workflow as per user request before SMD run.")
-                    pause_file = smd_workdir / "PAUSE"
-                    with open(pause_file, "w") as f:
-                        f.write("")  # empty PAUSE file
-                    logger.debug(f"[SMD] Created PAUSE file at {pause_file}")
-                    logger.info(f"[SMD] Run SMD using command: \n cd {smd_workdir} && mlp run_md --model_path {model_paths[0]}  --md_params smd.json --plumed plumed.dat")
-
-                    # check if PAUSE file exists in smd_workdir
-                    if pause_file.exists():
-                        logger.debug(f"[SMD] PAUSE file exists in {smd_workdir}. Please run the SMD simulation to proceed.")
-                        exit(0)
-                    else:
-                        logger.debug(f"[SMD] PAUSE file not found in {smd_workdir}. SMD simulation may have already been run. ")
-                        # check if tps.xyz exists in init_dir
-                        if not (Path(init_dir) / "tps.xyz").exists():
-                            logger.info(f"[SMD] Please verify and copy the resulting trajectory to the {init_dir} as tps.xyz to proceed with TPS sampling. ")
-                            user_input = input(f"Continue? (y/N): ")
-                            if user_input.lower() != 'y':
-                                logger.debug(f"[SMD] Exiting TPS workflow as per user request.")
-                                exit(0)
-                        else:
-                            logger.debug(f"[SMD] tps.xyz found in {init_dir}. Proceeding with TPS setup.")
-                else:
-                    #check if tps.xyz exists in init_dir
-                    if not (Path(init_dir) / "tps.xyz").exists():
-                        logger.error(f"[TPS] tps.xyz not found in {init_dir}. Cannot proceed with TPS setup.")
-                        raise FileNotFoundError(f"tps.xyz not found in {init_dir}. Cannot proceed with TPS setup.")
-                    else:
-                        logger.debug(f"[TPS] tps.xyz found in {init_dir}. Proceeding with TPS setup.")
-                os.chdir(tps_workdir)
-                logger.debug(f"[TPS WORKFLOW] Changed working directory to: {os.getcwd()}")
-                
-
-
-                #check if file exists smd.json in init_dir
-                if not (Path(init_dir) / "tps.json").exists():
-                    logger.error(f"[TPS] tps.json not found in {init_dir}. Cannot proceed with TPS setup.")
-                    raise FileNotFoundError(f"tps.json not found in {init_dir}")
-                source = Path(init_dir) / "tps.json"
-                dest = Path('tps.json')
-                dest.write_bytes(source.read_bytes())
-                logger.debug(f"[TPS] Copied tps.json to {dest}")
-
-                #edit the tps.json to have model paths
-                with open(dest, "r") as f:
-                    try:
-                        tps_config = json.load(f)
-                    except json.JSONDecodeError as e:
-                        logger.error(f"Error decoding JSON from {dest}: {e}")
-                        raise
-                tps_config["mace_model_path"] = model_paths
-                with open(dest, "w") as f:
-                    json.dump(tps_config, f, indent=4) 
-                logger.debug(f"[TPS] Updated tps.json with model paths.")
-
-                    #check if file exists smd.json in init_dir
-                if not (Path(init_dir) / "tps.xyz").exists():
-                    logger.error(f"[TPS] tps.xyz not found in {init_dir}. Cannot proceed with TPS setup.")
-                    raise FileNotFoundError(f"tps.xyz not found in {init_dir}. Cannot proceed with TPS setup.")
-                source = Path(init_dir) / "tps.xyz"
-                dest = Path('tps.xyz')
-                dest.write_bytes(source.read_bytes())
-                logger.debug(f"[TPS] Copied tps.xyz to {dest}")
-
-                    #check if file exists top.pdb in init_dir
-                if not (Path(init_dir) / "top.pdb").exists():
-                    logger.error(f"[TPS] top.pdb not found in {init_dir}. Cannot proceed with TPS setup.")
-                    raise FileNotFoundError(f"top.pdb not found in {init_dir}. Cannot proceed with TPS setup.")
-                source = Path(init_dir) / "top.pdb"
-                dest = Path('top.pdb')
-                dest.write_bytes(source.read_bytes())
-                logger.debug(f"[TPS] Copied top.pdb to {dest}")
-
-
-                # from tps import TPS_setup, Sampler
-                logger.debug("Setting up TPS sampler...")
-                logger.info(f"""[TPS] To run TPS sampler, execute the following command:
-                cd {tps_workdir} && tps_sampler""")
-
-                logger.info (f"[TPS] TPS workflow setup complete. Please run the TPS sampler as indicated above to proceed with TPS sampling.")
-                logger.info (f"[TPS] After running TPS sampler, please return here to continue the workflow.")
-                # ask and continue to next steps
-                user_input = input(f"Continue from TPS sampler now? (y/N): ")
-                if user_input.lower() != 'y':
-                    logger.debug(f"[TPS] Exiting TPS workflow as per user request before TPS run.")
-                    exit(0)
-                
-                #check folder extend in tps_workdir/traj 
-                traj_folder = tps_workdir / "traj"
-                if not traj_folder.exists():
-                    logger.error(f"[TPS] Trajectory folder not found: {traj_folder}. Cannot proceed with TPS analysis.")
-                    raise FileNotFoundError(f"Trajectory folder not found: {traj_folder}")
-                
-                if not (traj_folder/"extend").exists():
-                    logger.error(f"[TPS] Extend folder not found in trajectory folder: {traj_folder}. Cannot proceed with TPS analysis.")
-                    raise FileNotFoundError(f"Extend folder not found in trajectory folder: {traj_folder}")
-
-                # combine all extend traj files into one file in tps_workdir/traj/extend/combined_extend.xyz
-                extend_folder = traj_folder / "extend"
-                combined_extend_file = tps_workdir/"output" / "combined_extend.xyz"
-
-                combined_extend_file.parent.mkdir(parents=True, exist_ok=True)
-
-                # # Option 1: Using shutil.copyfileobj (fastest for multiple files)
-                # with open(combined_extend_file, "wb") as dest_f:
-                #     for extxyz_file in extend_folder.glob("*_extended.xyz"):
-                #         with open(extxyz_file, "rb") as src_f:
-                #             shutil.copyfileobj(src_f, dest_f)
-
-                # logger.debug(f"[TPS WORKFLOW] Combined extend traj files into {combined_extend_file}")
-
-                # select frames from combined_extend_file using util.traj_util.select_frames_onefile
-                # logger.debug(f"[TPS WORKFLOW] Selecting frames from combined extend traj...")
-                out_file = tps_workdir / "output" / "tps_selected_frames.xyz"
-                # select_frames(
-                #     xyz_path=str(combined_extend_file),
-                #     tps_params=tps_config,
-                #     out_file=str(out_file),
-                # )
-                # logger.debug(f"[TPS WORKFLOW] TPS frame selection complete.")
-
-                # copy outfile to init_dir for next gen
-
-                final_outfile = Path(init_dir) /str(gen)/ f"gen_{gen}_selected_frames.xyz"
-                shutil.copyfile(out_file, final_outfile)
-                logger.debug(f"[TPS WORKFLOW] Copied selected frames to {final_outfile} for next generation DFT calculations.")
-                #touch a DONE file in tps_workdir to indicate tps analysis is done
-                done_file = Path(tps_workdir) / "DONE"
-                done_file.touch()
-                logger.debug(f"[TPS WORKFLOW] Created DONE file at {done_file}")
-            else:
-                logger.debug(f"[TPS WORKFLOW] DONE file exists in tps folder. Skipping TPS workflow.")
-            logger.debug("[TPS WORKFLOW] TPS workflow complete.")
-
-            #touch a DONE file in init_dir/gen to indicate workflow gen is done
-            done_file = Path(init_dir) / str(gen) / "DONE"
-            done_file.touch()
-            logger.debug(f"Workflow gen{gen} complete.")
-            logger.debug(f"Moved back to initial directory: {os.getcwd()}")
-            # backup init_dir/init  to init_dir/gen/init and clean coords for next gen
-            backup_init_dir = Path(init_dir) / str(gen) / "init"
-            # if backup_init_dir.exists():
-            #     shutil.rmtree(backup_init_dir)
-            try:
-                shutil.copytree(Path(init_dir) / "init", backup_init_dir)
-                logger.debug(f"Backed up init directory to {backup_init_dir}")
-            except Exception as e:
-                logger.error(f"Failed to back up init directory: {e}")
-
-            # remove all .xyz files from init_dir/init for next gen
-            init_coords_dir = Path(init_dir) / "init"
-            for xyz_file in init_coords_dir.glob("*.xyz"):
-                xyz_file.unlink()
-            logger.debug(f"Cleaned up .xyz files from {init_coords_dir} for next generation.")
-
-            # copy gen_selected_frames.xyz to init_dir/init as coords for next gen dft
-            selected_frames_file = Path(init_dir) / str(gen) / f"gen_{gen}_selected_frames.xyz"
-            dest_file = init_coords_dir / "coord.xyz"
-            shutil.copyfile(selected_frames_file, dest_file)
-            logger.debug(f"Copied selected frames to {dest_file} for next generation DFT calculations.")
-            os.chdir(init_dir)
-            logger.debug(f"Returned to initial directory: {os.getcwd()}")
-            gen += 1
-            # ask if continue to next gen
-            user_input = input(f"Continue to next generation {gen}? (y/N): ")
-        else:
-            logger.debug(f"DONE file exists for generation {gen}. Skipping entire workflow for this generation.")
-            gen += 1
+    Workflow(config_path=args.config, start_gen=args.gen, only_stage=args.stage).run()
