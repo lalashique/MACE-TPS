@@ -1,0 +1,61 @@
+{
+    "system_name": "formic_acid_dehydrogenation",
+    "tot_mc_steps": 40,
+    "save_every": 8,
+    "save_rejected": true,
+    "UNITS": {
+        "size_unit": "nanometers",
+        "time_unit": "picoseconds",
+        "temp_unit": "kelvin"
+    },
+    "CV": {
+        "reaction_progress": {
+            "type": "bond",
+            "params": {
+                "group_A_atoms": [
+                    1,
+                    1
+                ],
+                "group_B_atoms": [
+                    2,
+                    3
+                ],
+                "type": 1
+            },
+            "bound": [
+                0.0,
+                0.16
+            ],
+            "unbound": [
+                0.22,
+                1.0
+            ]
+        }
+    },
+    "Integrator_settings": {
+        "temperature": 1600,
+        "constant_variable": "T",
+        "dt": 0.0002,
+        "friction": 1.0
+    },
+    "mace_model_path": [
+        "PLACEHOLDER_FILLED_IN_BY_WORKFLOW"
+    ],
+    "platform_name": "CPU",
+    "TPS_settings": {
+        "n_frames_max": 6000,
+        "n_steps_per_frame": 1
+    },
+    "top_file": "top.pdb",
+    "init_path": "tps.xyz",
+    "selection_indices": [
+        1,
+        2,
+        3
+    ],
+    "local_range": 5,
+    "num_select": 10,
+    "extend_steps": 40,
+    "alpha": 0.1,
+    "local_cutoff": 5.0
+}
