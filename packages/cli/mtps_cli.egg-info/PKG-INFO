@@ -1,0 +1,8 @@
+Metadata-Version: 2.4
+Name: mtps-cli
+Version: 0.1.0
+Summary: CLI for the MACE-TPS workbench. A GUI can be added later as its own package driving the same workflow.WorkflowEngine - nothing here is CLI-specific except argument parsing and printing.
+Requires-Python: >=3.9
+Requires-Dist: mtps-core
+Requires-Dist: mtps-workflow
+Requires-Dist: click

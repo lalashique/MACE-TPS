@@ -1,0 +1,18 @@
+{
+  "root_dir": "example_run",
+  "initial_structures": "example_data/structures.xyz",
+  "initial_trajectory": "example_data/trajectory.xyz",
+  "dft_backend": "mock",
+  "mlp_backend": "mock",
+  "tps_backend": "mock",
+  "committee_seeds": [123, 234, 345],
+  "n_tps_trajectories": 8,
+  "top_k_frames_per_generation": 3,
+  "max_generations": 2,
+  "gates": {
+    "dft_submit": "manual",
+    "smd_run": "auto",
+    "tps_run": "auto",
+    "continue_next_gen": "auto"
+  }
+}

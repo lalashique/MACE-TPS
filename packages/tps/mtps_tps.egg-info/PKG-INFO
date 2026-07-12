@@ -1,0 +1,16 @@
+Metadata-Version: 2.4
+Name: mtps-tps
+Version: 0.1.0
+Summary: TPS/AIMMD rare-event sampling backends for the MACE-TPS workbench (owned by the TPS/AIMMD team).
+Requires-Python: >=3.9
+Requires-Dist: mtps-core
+Provides-Extra: real
+Requires-Dist: openpathsampling; extra == "real"
+Requires-Dist: openmm; extra == "real"
+Requires-Dist: openmmtools; extra == "real"
+Requires-Dist: openmmml; extra == "real"
+Requires-Dist: mdtraj; extra == "real"
+Requires-Dist: ase; extra == "real"
+Requires-Dist: mace-torch; extra == "real"
+Requires-Dist: torch; extra == "real"
+Requires-Dist: loguru; extra == "real"

@@ -1,0 +1,12 @@
+Metadata-Version: 2.4
+Name: mtps-mlp
+Version: 0.1.0
+Summary: MLP training/inference backends for the MACE-TPS workbench (owned by the MLP/MACE team).
+Requires-Python: >=3.9
+Requires-Dist: mtps-core
+Provides-Extra: real
+Requires-Dist: torch; extra == "real"
+Requires-Dist: mace-torch; extra == "real"
+Requires-Dist: ase; extra == "real"
+Requires-Dist: loguru; extra == "real"
+Requires-Dist: pyyaml; extra == "real"

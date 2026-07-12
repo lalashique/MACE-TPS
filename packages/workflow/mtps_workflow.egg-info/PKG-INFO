@@ -1,0 +1,6 @@
+Metadata-Version: 2.4
+Name: mtps-workflow
+Version: 0.1.0
+Summary: Generational active-learning orchestration for the MACE-TPS workbench. Depends only on core + whichever backends are configured - never imports mace/cp2k/openpathsampling directly.
+Requires-Python: >=3.9
+Requires-Dist: mtps-core

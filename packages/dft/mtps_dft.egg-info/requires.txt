@@ -1,0 +1,9 @@
+mtps-core
+
+[pyscf]
+ase
+pyscf
+
+[real]
+ase
+loguru

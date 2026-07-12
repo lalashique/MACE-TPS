@@ -1,0 +1,17 @@
+[project]
+name = "mtps-mlp"
+version = "0.1.0"
+description = "MLP training/inference backends for the MACE-TPS workbench (owned by the MLP/MACE team)."
+requires-python = ">=3.9"
+dependencies = ["mtps-core"]
+
+[project.optional-dependencies]
+# Only needed for mlp.mace_backend.MACEBackend (the real backend).
+real = ["torch", "mace-torch", "ase", "loguru", "pyyaml"]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["mlp*"]

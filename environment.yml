@@ -1,0 +1,43 @@
+# Full installation of the MACE-TPS workbench, including the real TPS
+# backend's dependencies (OpenPathSampling + OpenMM + openmm-ml), which are
+# conda-forge only - there is no pip-only way to install them in a mutually
+# compatible combination. If you only want the mock backends or the
+# PySCF/MACE real backends (no real TPS), a plain venv + pip install is
+# enough - see the main README's "Quick mock run" / "Switching a stage to
+# the real backend" sections instead of this file.
+#
+# Usage:
+#   conda env create -f environment.yml
+#   conda activate mace-tps-workbench
+#   python scripts/check_environment.py
+#
+# (or `mamba env create -f environment.yml` - much faster to solve)
+name: mace-tps-workbench
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pip
+  - openmm
+  - openmmtools
+  - openmm-ml
+  - openpathsampling
+  - mdtraj
+  - ase
+  - numpy<2.0  # openpathsampling constraint; mace-torch/pyscf are fine with this too
+  - pip:
+      - mace-torch
+      - pyscf
+      - loguru
+      - pyyaml
+      - MDAnalysis
+      - click
+      - nbformat
+      - nbclient
+      - matplotlib
+      - -e ./packages/core
+      - -e ./packages/dft[real,pyscf]
+      - -e ./packages/mlp[real]
+      - -e ./packages/tps[real]
+      - -e ./packages/workflow
+      - -e ./packages/cli

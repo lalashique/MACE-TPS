@@ -1,0 +1,13 @@
+[project]
+name = "mtps-workflow"
+version = "0.1.0"
+description = "Generational active-learning orchestration for the MACE-TPS workbench. Depends only on core + whichever backends are configured - never imports mace/cp2k/openpathsampling directly."
+requires-python = ">=3.9"
+dependencies = ["mtps-core"]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["workflow*"]

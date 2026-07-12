@@ -1,0 +1,17 @@
+[project]
+name = "mtps-tps"
+version = "0.1.0"
+description = "TPS/AIMMD rare-event sampling backends for the MACE-TPS workbench (owned by the TPS/AIMMD team)."
+requires-python = ">=3.9"
+dependencies = ["mtps-core"]
+
+[project.optional-dependencies]
+# Only needed for tps.ops_backend.OPSTPSSampler (the real backend).
+real = ["openpathsampling", "openmm", "openmmtools", "openmmml", "mdtraj", "ase", "mace-torch", "torch", "loguru"]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["tps*"]

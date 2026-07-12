@@ -1,0 +1,8 @@
+mtps-core
+
+[real]
+torch
+mace-torch
+ase
+loguru
+pyyaml

@@ -1,0 +1,8 @@
+{
+  "engine": "cp2k",
+  "run_mode": "prepare",
+  "/Users/ashiuqe/Documents/mace/mace-tps-workbench/real_test/dft_real_run/structure_0": {
+    "status": 0,
+    "file": "/Users/ashiuqe/Documents/mace/mace-tps-workbench/real_test/dft_real/coord.xyz"
+  }
+}

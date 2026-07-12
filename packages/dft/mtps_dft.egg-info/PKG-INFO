@@ -1,0 +1,12 @@
+Metadata-Version: 2.4
+Name: mtps-dft
+Version: 0.1.0
+Summary: DFT labeling backends for the MACE-TPS workbench (owned by the DFT/CP2K team).
+Requires-Python: >=3.9
+Requires-Dist: mtps-core
+Provides-Extra: real
+Requires-Dist: ase; extra == "real"
+Requires-Dist: loguru; extra == "real"
+Provides-Extra: pyscf
+Requires-Dist: ase; extra == "pyscf"
+Requires-Dist: pyscf; extra == "pyscf"

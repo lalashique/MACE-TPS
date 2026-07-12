@@ -1,0 +1,20 @@
+[project]
+name = "mace-tps-workbench"
+version = "0.1.0"
+description = "Workspace root for the MACE-TPS active-learning workbench"
+requires-python = ">=3.9"
+
+# This root project is not meant to be installed itself. Each package under
+# packages/ is independently installable:
+#
+#   pip install -e packages/core
+#   pip install -e packages/dft          # + cp2k/ase for the real backend
+#   pip install -e packages/mlp          # + torch/mace for the real backend
+#   pip install -e packages/tps          # + openpathsampling/openmm for the real backend
+#   pip install -e packages/workflow
+#   pip install -e packages/cli
+#
+# For the fast mock end-to-end run, only core + the four "mock" extras are
+# needed - see README.md "Quick mock run" section.
+[tool.pytest.ini_options]
+testpaths = ["tests"]

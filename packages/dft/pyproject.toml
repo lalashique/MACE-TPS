@@ -1,0 +1,22 @@
+[project]
+name = "mtps-dft"
+version = "0.1.0"
+description = "DFT labeling backends for the MACE-TPS workbench (owned by the DFT/CP2K team)."
+requires-python = ">=3.9"
+dependencies = ["mtps-core"]
+
+[project.optional-dependencies]
+# Only needed if you use dft.cp2k_backend.CP2KDFTEngine (periodic systems -
+# also requires a CP2K binary on PATH, not installable via pip).
+# The mock backend (dft.mock_backend.MockDFTEngine) has zero extra deps.
+real = ["ase", "loguru"]
+# Non-periodic (molecular) DFT via dft.pyscf_backend.PySCFDFTEngine - pure
+# pip-installable, no external binary or job-submission step needed.
+pyscf = ["ase", "pyscf"]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["dft*"]

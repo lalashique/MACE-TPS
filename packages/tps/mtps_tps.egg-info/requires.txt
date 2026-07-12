@@ -1,0 +1,12 @@
+mtps-core
+
+[real]
+openpathsampling
+openmm
+openmmtools
+openmmml
+mdtraj
+ase
+mace-torch
+torch
+loguru

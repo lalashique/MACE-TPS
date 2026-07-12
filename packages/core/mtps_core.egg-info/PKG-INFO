@@ -1,0 +1,5 @@
+Metadata-Version: 2.4
+Name: mtps-core
+Version: 0.1.0
+Summary: Shared contracts (interfaces, schemas, state, gates) for the MACE-TPS workbench. No heavy scientific deps on purpose - everyone installs this.
+Requires-Python: >=3.9
