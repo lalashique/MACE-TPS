@@ -31,3 +31,19 @@ def process_frame(atoms, carbon_indices, cutoff):
 
     return energy_var, force_var, local_mean, local_max
 
+
+
+def paper_selection_weights(metrics, lam: float = 0.7):
+    """Selection probabilities of Lal et al. (arXiv:2605.03737) Eq. 2-4.
+
+    metrics: (n, >=3) array of committee variances (energy, force, CO2-local force).
+    R_ki = var_ki / sum_j var_kj ; S_i = sum_k R_ki ; w_i = (lam*S_i + 1-lam) / sum_j(...).
+    NaN (e.g. no atoms in the local region) counts as 0.
+    """
+    obs = np.nan_to_num(np.asarray(metrics, dtype=float)[:, :3], nan=0.0)
+    if (obs < 0).any():
+        raise ValueError("variances must be non-negative")
+    tot = obs.sum(axis=0)
+    R = np.divide(obs, tot, out=np.zeros_like(obs), where=tot > 0)
+    w = lam * R.sum(axis=1) + (1 - lam)
+    return w / w.sum()

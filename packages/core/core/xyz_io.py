@@ -133,8 +133,36 @@ def train_test_split_raw(
     blocks = iter_raw_blocks(path)
     order = list(range(len(blocks)))
     random.Random(seed).shuffle(order)
-    n_test = max(1, int(len(order) * test_fraction)) if blocks else 0
+    # same rounding as legacy train_test_split: train = int((1 - f) * n)
+    n_test = max(1, len(order) - int((1 - test_fraction) * len(order))) if blocks else 0
     test_idx, train_idx = set(order[:n_test]), set(order[n_test:])
     write_raw_blocks(train_out, [b for i, b in enumerate(blocks) if i in train_idx])
     write_raw_blocks(test_out, [b for i, b in enumerate(blocks) if i in test_idx])
     return Path(train_out), Path(test_out)
+
+
+def concat_xyz(paths: list[Path], out_path: Path) -> Path:
+    """Concatenate xyz/extxyz files frame-wise (raw blocks, format-agnostic)."""
+    blocks: list[str] = []
+    for path in paths:
+        blocks.extend(iter_raw_blocks(Path(path)))
+    write_raw_blocks(Path(out_path), blocks)
+    return Path(out_path)
+
+
+def split_blocks(path: Path, n_splits: int, out_dir: Path, prefix: str = "split_") -> list[Path]:
+    """Split a file into `n_splits` contiguous chunks `<prefix>1.xyz` .. `<prefix>N.xyz`
+    (1-based, as in the legacy runs) for parallel DFT jobs. The remainder goes to the last chunk.
+    """
+    blocks = iter_raw_blocks(path)
+    if n_splits < 1 or n_splits > max(len(blocks), 1):
+        raise ValueError(f"Cannot split {len(blocks)} frames into {n_splits} chunks.")
+    per = len(blocks) // n_splits
+    outs = []
+    for i in range(n_splits):
+        lo = i * per
+        hi = (i + 1) * per if i < n_splits - 1 else len(blocks)
+        out = Path(out_dir) / f"{prefix}{i + 1}.xyz"
+        write_raw_blocks(out, blocks[lo:hi])
+        outs.append(out)
+    return outs

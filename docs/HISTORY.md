@@ -133,3 +133,28 @@ on macOS (conda's libomp vs. torch's bundled one), set `KMP_DUPLICATE_LIB_OK=TRU
   touching orchestration logic.
 - Real CP2K/TPS running on a real multi-hundred-atom system with periodic water/electrode chemistry
   hasn't been exercised here - only small test systems (water, a synthetic diatomic, formic acid).
+
+## Real-system workflow extensions (paper reproduction)
+
+Added so the pipeline can run the Cu(100)/water CO2 study ([arXiv:2605.03737](https://arxiv.org/abs/2605.03737))
+end to end. All options default to the earlier behaviour.
+
+- **Inputs and DFT:** `initial_structures` may be a list (one `structure_N` per file); `n_dft_splits` /
+  `dft_frames_per_split` split generation >0 DFT into parallel chunks; `cumulative_training` trains on all
+  labelled data so far; the CP2K backend parses only after every `structure_N` has finished
+  (`dft/reftraj_check.py`) and can drop frames whose SCF did not converge (`filter_unconverged`).
+- **Selection:** `selection_mode` (`topk` | `sampler`) and `selection_scheme` (`legacy` | `paper`, with
+  `lambda`); the paper scheme is `tps.util.mlp_helper.paper_selection_weights`.
+- **Steered MD:** `smd_settings` with an ASE + PLUMED runner (`mlp/run_md.py`, `auto_run`) producing
+  `<gen>/tps/smd/tps.xyz`, gate `smd_run`.
+- **Foundation models:** `mlp_settings.foundation_models` uses MACE-MP (`mlp/foundation.py`, specs like
+  `mace_mp:medium` or a path) and skips training.
+- **Initial data:** `init_md_settings` runs Langevin MD with a foundation model on each initial structure
+  (`mlp/init_md.py`, gate `init_md`, resumable); the frames become the generation-0 DFT inputs.
+- **Fixes found by real runs:** CV functions in `tps/util/cv.py` must not use module-level globals (OPS cannot
+  store them); E0s given as a dict are converted to the string MACE expects.
+- **Verified by running:** CP2K + MACE + OpenPathSampling end to end for three generations, the SMD ->
+  TPS chain with MACE-MP, and the initial-data MD stage (short runs). **Not run:** the full 5000-step
+  steered MD, the 1 ns initial MD and the production TPS (too slow on CPU), GPU training.
+- **Tooling and data:** `scripts/make_config.py` builds a config from a project directory; `examples/Cu_CO2/`
+  holds the inputs, final train/test data and trained committees; usage is in [HOWTO_RUN.md](HOWTO_RUN.md).

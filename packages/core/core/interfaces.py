@@ -61,9 +61,9 @@ class DFTEngine(ABC):
     """Reference (ab initio) labeling backend, e.g. CP2K."""
 
     @abstractmethod
-    def label(self, structures: Path, workdir: Path) -> Path:
+    def label(self, structures: Path | Sequence[Path], workdir: Path) -> Path:
         """Compute reference energy/forces for every frame in `structures`
-        (an xyz/extxyz file) and return the path to a combined extxyz file
+        (an xyz/extxyz file, or a list of them - one parallel job/structure_N each) and return the path to a combined extxyz file
         with `energy`/`forces` arrays set.
 
         May raise NeedsExternalJob if labeling requires a step outside this

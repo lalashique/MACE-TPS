@@ -1,0 +1,10 @@
+{
+    "cell" : [ 14.46,14.46,40],
+    "time_step" : 1.0,
+    "temperature" : 400,
+    "friction" : 5e-3,
+    "interval" : 1,
+    "small_interval" : 5,
+    "total_steps" : 5000
+
+}

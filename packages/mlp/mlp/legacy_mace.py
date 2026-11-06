@@ -139,7 +139,12 @@ class MACE_MLP(MLP):
 
         if not self.E0s:
             raise ValueError("E0s must be provided for training.")
-        cfg["E0s"] = self.E0s
+        # MACE parses E0s from a string like "{29: -1303.85}" (the legacy runs' train.yaml stores it
+        # that way); a dict loaded from JSON would have string keys, so normalise to int keys.
+        if isinstance(self.E0s, dict):
+            cfg["E0s"] = "{" + ", ".join(f"{int(k)}: {v}" for k, v in self.E0s.items()) + "}"
+        else:
+            cfg["E0s"] = self.E0s
 
         if train_file:
             if not absolute_paths:

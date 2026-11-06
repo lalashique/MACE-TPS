@@ -186,7 +186,16 @@ class CP2KDFT(DFTBase):
             pos_lines = (folder / "cp2k-pos-1.xyz").read_text().splitlines()
             frc_lines = (folder / "cp2k-frc-1.xyz").read_text().splitlines()
 
+            converge_flags = None
+            if self.settings.get("filter_unconverged", False):
+                # Legacy behaviour: one "converge" line per reftraj step in cp2k.out;
+                # steps whose line contains "NOT" are dropped.
+                out_lines = [l for l in (folder / "cp2k.out").read_text().splitlines() if "converge" in l]
+                converge_flags = ["NOT" not in l for l in out_lines]
+                logger.info(f"[CP2K] converged steps: {sum(converge_flags)}/{len(converge_flags)} in {folder}")
+
             atoms_list = []
+            frame_idx = 0
             i = 0
             while i < len(pos_lines):
                 if not pos_lines[i].strip():
@@ -211,9 +220,15 @@ class CP2KDFT(DFTBase):
                 atoms = Atoms(symbols=symbols, positions=positions, cell=cell, pbc=False)
                 atoms.info["energy_cp2k"] = energy
                 atoms.arrays["forces_cp2k"] = np.array(forces)
-                atoms_list.append(atoms)
+                if converge_flags is None or (frame_idx < len(converge_flags) and converge_flags[frame_idx]):
+                    atoms_list.append(atoms)
+                frame_idx += 1
                 i += 2 + n
 
+            if converge_flags is not None and len(converge_flags) != frame_idx:
+                raise ValueError(
+                    f"{folder}: {len(converge_flags)} 'converge' lines in cp2k.out but {frame_idx} frames in cp2k-pos-1.xyz"
+                )
             write(str(folder / "extdata.xyz"), atoms_list, format="extxyz")
 
 

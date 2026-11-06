@@ -145,6 +145,7 @@ class CV:
         
     @staticmethod
     def CN(snapshot, group_A_atoms, group_B_atoms, d0=1.25, n=12, m=24):
+        import numpy as np  # local: OPS refuses to store CVs that use module-level globals (see CV.bond)
         from MDAnalysis.lib.distances import distance_array  # see CV.bond for why local
 
         d0 = d0/10  # in nm

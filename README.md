@@ -15,7 +15,20 @@ repeated until the committee converges on the pathway(s) a system actually takes
 See [tutorials/formic_acid_decomposition/](tutorials/formic_acid_decomposition/) for a complete,
 real worked example (a small molecule with two competing decomposition pathways, both discovered by
 this pipeline), and [docs/CREATING_A_TUTORIAL.md](docs/CREATING_A_TUTORIAL.md) for how to set up your
-own system.
+own system. To run the pipeline on a real periodic system (Cu(100)/water with CO2, as in
+[arXiv:2605.03737](https://arxiv.org/abs/2605.03737)), follow [docs/HOWTO_RUN.md](docs/HOWTO_RUN.md);
+the inputs, final training data and trained models are in [examples/Cu_CO2/](examples/Cu_CO2/).
+
+Features beyond the basic loop:
+
+- **Foundation-model mode:** use MACE-MP instead of training (`mlp_settings.foundation_models`).
+- **Initial-data generation:** run foundation-model MD on any number of initial structures to create the
+  generation-0 DFT inputs (`init_md_settings`, gate `init_md`).
+- **Steered MD:** ASE + PLUMED steered MD to build the initial TPS path (`smd_settings`).
+- **Frame selection:** the per-metric weighted draw, or the uncertainty-weighted scheme of the paper
+  (`selection_scheme: "paper"`, `lambda`).
+- **Parallel and cumulative DFT/training:** several initial structures, DFT split into chunks, training on
+  all labelled data so far.
 
 ## Layout
 
@@ -35,12 +48,16 @@ packages/
 │       ├── pyscf_backend.py   # real, non-periodic (molecules) - pip-installable, in-process
 │       ├── cp2k_backend.py    # real, periodic (slabs/solvated) - external CP2K process
 │       ├── legacy_cp2k.py     # CP2K reftraj engine implementation
+│       ├── reftraj_check.py   # checks that a CP2K run finished before its output is parsed
 │       └── cpoker_iparser.py  # @SET/@include-aware CP2K input-deck parser
 │
 ├── mlp/        # MLP (MACE) training/inference backends
 │   └── mlp/
 │       ├── mock_backend.py    # instant "committee", zero deps
 │       ├── legacy_mace.py     # MACE_MLP: committee training, loading, evaluation
+│       ├── foundation.py      # MACE-MP foundation models (`mace_mp:<size>`), no training
+│       ├── init_md.py         # initial-data generation: MD with a foundation model
+│       ├── run_md.py          # ASE + PLUMED steered-MD runner
 │       └── mace_backend.py    # adapter: MACE_MLP -> MLPBackend interface
 │
 ├── tps/        # TPS/AIMMD rare-event sampling backends
@@ -58,6 +75,17 @@ packages/
 
 tutorials/
 └── formic_acid_decomposition/  # complete real worked example - see its own README
+
+examples/
+└── Cu_CO2/        # inputs, final train/test data and MACE committees of the Cu(100)/water CO2 system
+
+scripts/
+├── env.sh               # sets PYTHONPATH etc. so the packages run from a checkout
+├── check_environment.py # reports which backends are usable
+├── make_config.py       # project directory -> workflow config JSON
+└── verify_config.py     # checks a generated config (no backend is run)
+
+docs/              # HOWTO_RUN.md (real run), CREATING_A_TUTORIAL.md, HISTORY.md
 
 tests/
 └── test_workflow_smoke.py     # full mock end-to-end loop + manual-gate resume test
@@ -143,6 +171,8 @@ point of view.
 
 ## Further reading
 
+- [docs/HOWTO_RUN.md](docs/HOWTO_RUN.md) - running the full pipeline on a real system: setup, config
+  generation, the DFT/approval loop, initial-data generation, expected output and troubleshooting.
 - [docs/CREATING_A_TUTORIAL.md](docs/CREATING_A_TUTORIAL.md) - how to set up a new system: choosing a
   DFT backend, designing a reaction-progress CV, bootstrapping a seed trajectory, scaling up the
   generational loop, and structuring an analysis notebook.

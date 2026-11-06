@@ -68,8 +68,9 @@ class MockDFTEngine(DFTEngine):
         self.energy_key = energy_key
         self.forces_key = forces_key
 
-    def label(self, structures: Path, workdir: Path) -> Path:
-        frames = read_frames(structures)
+    def label(self, structures, workdir: Path) -> Path:
+        paths = list(structures) if isinstance(structures, (list, tuple)) else [structures]
+        frames = [f for path in paths for f in read_frames(path)]
         energies, forces_per_frame = [], []
         for frame in frames:
             energy, forces = toy_energy_and_forces(frame)

@@ -1,0 +1,126 @@
+################################# SYSTEM
+@SET CMD                   FALSE                  
+@SET SLAB                  0
+################################# GLOBAL
+@SET SYSNAME               02
+@SET RTYPE                 MD
+@SET RESTART               FALSE
+
+
+@SET PRINT_VHARTREE        FALSE
+@SET PRINT_EDENSITY        FALSE
+
+################################# FORCE_EVAL
+@SET SCHARGE               0
+@SET SMULTIPLICITY         2
+@SET LSD                   TRUE
+@SET QS_METHOD             GPW
+@SET COORD_NAME            coord.xyz
+@SET COORD_FORMAT          XYZ
+
+@SET CUTOFF                400
+@SET GRIDS                 5
+@SET RELCUTOFF             50
+@SET SCF_CONV              1.0E-6 
+@SET SCF_NCYCLES           15
+@SET SCF_OCYCLES           10
+
+@IF (${RESTART} == TRUE )
+  @SET SCF_GUESS            RESTART
+@ENDIF
+@IF (${RESTART} == FALSE )
+  @SET SCF_GUESS            ATOMIC
+@ENDIF
+
+
+
+##################################################################
+
+&GLOBAL
+  PRINT_LEVEL LOW
+  PROJECT cp2k
+  RUN_TYPE $RTYPE
+&END GLOBAL
+
+
+
+#&EXT_RESTART
+#   RESTART_FILE_NAME cp2k-1.restart
+#&END EXT_RESTART
+
+
+
+
+# # GEO_OPT or MD
+@SET METHOD QS
+@SET a 1
+@include force_eval.inp
+
+
+
+&MOTION
+  # &GEO_OPT
+  #   &BFGS
+  #     &RESTART
+  #       &EACH
+  #         QS_SCF 0
+  #       &END EACH
+  #     &END RESTART
+  #   &END BFGS
+  # &END GEO_OPT
+  &MD
+  &REFTRAJ
+    EVAL ENERGY_FORCES
+    STRIDE 1
+    TRAJ_FILE_NAME coord.xyz
+  &END REFTRAJ
+    ENSEMBLE REFTRAJ
+    STEPS 4000
+    TIMESTEP 1
+    TEMPERATURE 320
+    # COMVEL_TOL 0
+
+    &THERMOSTAT
+     TYPE NOSE
+     &NOSE
+        LENGTH 4
+        YOSHIDA 9
+        TIMECON  50.0
+        MULTIPLE_TIME_STEPS 2
+    &END NOSE
+    &CSVR
+      TIMECON 50
+    &END
+    &END
+  &END MD
+
+&PRINT
+&RESTART
+&EACH
+MD 10
+&END EACH
+&END RESTART
+
+&STRESS LOW
+&EACH
+MD 1
+&END EACH
+&END STRESS
+   &FORCES
+    FORMAT XYZ
+    PRINT_ATOM_KIND T
+    &EACH
+     MD 1
+    &END
+   &END FORCES
+   &TRAJECTORY
+    FORMAT XYZ
+    PRINT_ATOM_KIND T
+    &EACH
+     GEO_OPT 1
+     MD 1
+    &END
+   &END TRAJECTORY
+&END PRINT
+
+&END MOTION

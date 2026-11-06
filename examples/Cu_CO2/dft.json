@@ -1,0 +1,26 @@
+{
+ "engine": "cp2k",
+ "settings": {
+  "command": "mpirun -np 4 cp2k.psmp"
+ },
+ "input_files": [
+  "init/cp2k.inp",
+  "init/force_eval.inp"
+ ],
+ "run_mode": "prepare",
+ "structures": [
+  "init/coord1.xyz",
+  "init/coord2.xyz",
+  "init/coord3.xyz",
+  "init/coord4.xyz",
+  "init/coord5.xyz",
+  "init/coord6.xyz",
+  "init/coord7.xyz",
+  "init/coord8.xyz",
+  "init/coord9.xyz",
+  "init/coord10.xyz",
+  "init/coord11.xyz",
+  "init/coord12.xyz",
+  "init/coord13.xyz"
+ ]
+}

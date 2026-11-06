@@ -269,7 +269,7 @@ def extend_and_select_frames(sampler: Sampler, mace_model_paths: list, workdir: 
     from mace.calculators import MACECalculator
     from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
     from ase.md.langevin import Langevin
-    from tps.util.mlp_helper import process_frame
+    from tps.util.mlp_helper import paper_selection_weights, process_frame
     from mlp.legacy_mace import MACE_MLP
 
     workdir = Path(workdir)
@@ -383,6 +383,23 @@ def extend_and_select_frames(sampler: Sampler, mace_model_paths: list, workdir: 
     metrics_filt, atoms_filt = metrics[mask], [a for a, keep in zip(atoms_list, mask) if keep]
     if len(metrics_filt) == 0:
         metrics_filt, atoms_filt = metrics, atoms_list
+
+    scheme = sampler.config_file.get("selection_scheme", "legacy")
+    if scheme == "paper":
+        # Lal et al. (arXiv:2605.03737) Eq. 2-4: per-observable variance normalised over the dataset
+        # (energy, force, CO2-local force), summed into S_i; importance weights w_i ~ lam*S_i + (1-lam).
+        lam = float(sampler.config_file.get("lambda", 0.7))
+        if not 0.0 <= lam <= 1.0:
+            raise ValueError(f"lambda must be in [0, 1], got {lam}")
+        w = paper_selection_weights(metrics_filt, lam)
+        n_pick = min(num_select, len(w))
+        pick = np.random.choice(len(w), size=n_pick, replace=False, p=w / w.sum())
+        selected = [atoms_filt[i] for i in np.sort(pick)]
+        output_path = workdir / "tps_selected_frames.xyz"
+        write(output_path, selected)
+        return output_path
+    if scheme != "legacy":
+        raise ValueError(f"Unknown selection_scheme: {scheme!r} (use 'legacy' or 'paper')")
 
     worst_idx = []
     for col in range(metrics_filt.shape[1]):
