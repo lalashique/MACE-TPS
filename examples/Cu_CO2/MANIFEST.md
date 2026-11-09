@@ -1,6 +1,6 @@
 # Cu_CO2 example data (copied 2026-11-06 from the reference Cu_CO25 run)
 
-Copies, originals untouched. data/*.gz = gzip -9 of reference <gen>/mlp/data/{train,test}.xyz (cumulative). models = <gen>/mlp/runs/c*/MACE_models/mace01.model. smd/path0|path5 = ref smd/0/1 and smd/5/1 (coord.xyz -> smd.xyz). dft.json/mlp.yaml/tps.json/top.pdb/tps.xyz derived from the reference run. Gen 3 is incomplete in the reference.
+Copies, originals untouched. data/*.gz (gens 0-2, gzip -9) and data/*.xz (gens 3-5, xz -9) = compressed copies of reference <gen>/mlp/data/{train,test}.xyz (cumulative). models = <gen>/mlp/runs/c*/MACE_models/mace01.model. smd/path0|path5 = ref smd/0/1 and smd/5/1 (coord.xyz -> smd.xyz). dft.json/mlp.yaml/tps.json/top.pdb/tps.xyz derived from the reference run. Gen 3 is incomplete in the reference.
 
 ```
 007f53e2ec60c0b5       6.3 MB  ./data/gen0/test.xyz.gz
@@ -52,3 +52,13 @@ b4d7cddee4529ecb       0.0 MB  ./smd/path5/plumed.dat
 cp2k_data/: CP2K data files named in init/force_eval.inp, copied from CP2K 2026.1 (Homebrew). The reference run used CP2K 2024.1 - compare against your install before relying on them. Use: export CP2K_DATA_DIR=$PWD/cp2k_data (CP2K is GPL-2.0; check redistribution).
 96070872512da557      43.6 MB  ./data/gen3/train.xyz.xz
 0576e2a36bccad5d      11.0 MB  ./data/gen3/test.xyz.xz
+3e079d714610c274      51.3 MB  ./data/gen4/train.xyz.xz
+535e0f67fabb7da2      13.0 MB  ./data/gen4/test.xyz.xz
+c0e268749a87867d       7.7 MB  ./models/gen4/c0/mace01.model
+3e276057bf48cf23       7.7 MB  ./models/gen4/c1/mace01.model
+63ab6b4b45244738       7.7 MB  ./models/gen4/c2/mace01.model
+90cb07a11ce1f89e      59.1 MB  ./data/gen5/train.xyz.xz
+6b63f4e824abe34e      14.9 MB  ./data/gen5/test.xyz.xz
+5de8abfc187541f8       7.7 MB  ./models/gen5/c0/mace01.model
+7f35e9cb2ec99d90       7.7 MB  ./models/gen5/c1/mace01.model
+1f4dff4d987c3c35       7.7 MB  ./models/gen5/c2/mace01.model

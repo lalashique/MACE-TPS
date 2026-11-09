@@ -1,9 +1,6 @@
-# Creating a new tutorial system
+# Setting up a new system
 
-A worked example: [tutorials/formic_acid_decomposition/](../tutorials/formic_acid_decomposition/) -
-read that folder's own README first if you want a concrete reference to follow alongside this guide.
-
-This document is the general recipe for setting up *any* new system: what files a tutorial needs,
+This document is the general recipe for setting up *any* new system: what files a new system needs,
 how to design a reaction-progress collective variable (CV), how to bootstrap a seed trajectory without
 needing expensive ab initio MD, and how to structure the analysis notebook. It applies to molecules
 (PySCF DFT backend) and periodic/slab systems (CP2K DFT backend) alike - the workflow engine and TPS
@@ -11,12 +8,12 @@ machinery don't care which.
 
 ## 1. Pick a system with something to discover
 
-The best tutorial systems have **more than one plausible reaction pathway** from the same starting
+The best example systems have **more than one plausible reaction pathway** from the same starting
 point - that's what this workbench's active-learning loop (committee uncertainty -> targeted DFT
 labeling -> retraining -> more TPS) is actually for. A system with only one accessible mechanism still
 exercises the pipeline, but doesn't demonstrate the "discover multiple mechanisms" story.
 
-Practical constraints for a *quick* tutorial (not a production campaign):
+Practical constraints for a *quick* test system (not a production campaign):
 - Small (a handful of atoms for a molecule; a small slab + a few adsorbates/solvent molecules for a
   periodic system) - DFT labeling cost and MD step cost both scale with atom count.
 - A real, chemically identifiable reaction, not a made-up potential - lets you sanity-check results
@@ -49,7 +46,7 @@ modes - you likely don't need a new CV function, just the right parameters:
   broken" - useful as a single combined bound/unbound indicator when multiple different bonds could
   be the one that breaks (e.g. two competing reaction channels breaking different bonds from the same
   reactant). Pass the shared atom index twice if you need to pair it against two different partners
-  (see the formic acid tutorial's `group_A_atoms: [1, 1], group_B_atoms: [2, 3]` for exactly this).
+  (e.g. `group_A_atoms: [1, 1], group_B_atoms: [2, 3]`).
 - `type=-1` (min distance) is the complementary "closest approach" mode.
 - `CN` (coordination number, a smooth switching function) is useful when "bonded or not" is ambiguous
   near the cutoff and you want a differentiable proxy instead of a hard distance threshold.
@@ -60,9 +57,9 @@ before committing to thresholds) rather than guessing.
 
 **Distinguishing *which* mechanism occurred is a job for post-hoc analysis, not the CV.** TPS only
 needs "intact" vs. "decomposed" to sample paths; the analysis notebook classifies specific mechanisms
-from full geometry after the fact (see the formic acid tutorial's `analysis.ipynb` for the pattern:
-classify by which *new* bond has formed, not just which old bond broke - concerted/asynchronous
-transitions can have the new bond form slightly before the old one fully separates).
+from full geometry after the fact (classify by which *new* bond has formed, not just which old bond
+broke - concerted/asynchronous transitions can have the new bond form slightly before the old one
+fully separates).
 
 ## 4. Bootstrap a seed trajectory
 
@@ -73,9 +70,7 @@ first:
 1. **Foundation-model-driven high-T MD** (recommended for molecules): relax your system with a
    pretrained model (e.g. MACE-OFF for organic molecules, MACE-MP for inorganic/materials systems -
    both free via `mace.calculators`), then run short high-temperature MD bursts until you observe a
-   spontaneous transition. No training data needed. See
-   `tutorials/formic_acid_decomposition/setup_system.py` for a complete, reusable implementation of
-   this, including two things you'll likely also need:
+   spontaneous transition. No training data needed. You'll likely also need:
    - **A blow-up guard.** Foundation models are approximate and can occasionally send a shooting
      trajectory into complete, unphysical fragmentation shortly after a genuine crossing. Don't save
      a seed trajectory that captures that - discard the attempt and retry.
@@ -100,9 +95,9 @@ itself injects its own unseeded randomness at every step from ASE's global rando
 
 ## 5. Write the workflow config
 
-See `tutorials/formic_acid_decomposition/run_tutorial.py` for a complete example building a
-`WorkflowConfig` (DFT/MLP/TPS backend choice, committee size, generations, gates) and driving
-`WorkflowEngine.run_to_completion()`. Scale-up knobs, roughly in order of what to increase first if
+Build a `WorkflowConfig` (DFT/MLP/TPS backend choice, committee size, generations, gates) and drive
+`WorkflowEngine.run_to_completion()` - see `example_mock_config.json` and `tests/test_workflow_smoke.py`
+for configs, and [HOWTO_RUN.md](HOWTO_RUN.md) for a real run. Scale-up knobs, roughly in order of what to increase first if
 your system isn't finding a mechanism robustly:
 - `committee_seeds` (more members -> better uncertainty estimates, catches more of the phase space)
 - `tps.json`'s `tot_mc_steps` / `extend_steps` (more shooting attempts, longer extensions)
@@ -120,5 +115,4 @@ order" to see where sampling actually went, classify frames into mechanisms, and
 suspicious findings** rather than taking classification counts at face value - a single
 mechanism-classified frame with no smooth history behind it (check consecutive-frame distance jumps
 within one accepted/rejected trajectory file) is more likely a numerical artifact from an approximate
-potential than a real event. See `tutorials/formic_acid_decomposition/analysis.ipynb`'s "sanity check"
-cell for the pattern; it exists because exactly this happened once during that tutorial's development.
+potential than a real event.

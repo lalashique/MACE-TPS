@@ -51,10 +51,10 @@ A ready-made project for the Cu(100)/water CO2 system is in `examples/Cu_CO2/`:
 | `cp2k_data/` | CP2K basis/potential files named in `force_eval.inp` |
 | `dft.json`, `mlp.yaml`, `tps.json`, `top.pdb`, `tps.xyz` | DFT, MACE-training and TPS settings, topology, initial path |
 | `smd/path0`, `smd/path5` | steered-MD inputs (`smd.xyz`, `smd.json`, `plumed.dat`) for the two pathways |
-| `data/gen0-3/` | cumulative train/test sets per generation (`.xyz.gz`; gen 3: `.xyz.xz`) |
-| `models/gen0-3/c0-2/` | trained MACE committee (3 models) per generation |
+| `data/gen0-5/` | cumulative train/test sets per generation (`.xyz.gz` for gens 0-2, `.xyz.xz` for gens 3-5) |
+| `models/gen0-5/c0-2/` | trained MACE committee (3 models) per generation |
 
-`MANIFEST.md` there lists every file with checksum and origin. Gen 3 is incomplete in the source run. Use the data and models
+`MANIFEST.md` there lists every file with checksum and origin. Gen 3 in the source run was built from incomplete CP2K output (fewer labelled frames than planned). Use the data and models
 for analysis or as a starting point; the workflow regenerates them itself.
 
 ```bash

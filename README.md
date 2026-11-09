@@ -1,5 +1,10 @@
 # MACE-TPS Workbench
 
+> **Data for the paper** ([arXiv:2605.03737](https://arxiv.org/abs/2605.03737)) is in [`examples/`](examples/):
+> see [`examples/Cu_CO2/`](examples/Cu_CO2/) for the inputs, the training/test data and the trained MACE models
+> of generations 0-5.
+> To run the workflow on it, follow [docs/HOWTO_RUN.md](docs/HOWTO_RUN.md).
+
 An active-learning pipeline for discovering reaction mechanisms: DFT labeling -> MACE committee
 training -> Transition Path Sampling (TPS) -> uncertainty-driven frame selection -> next generation,
 repeated until the committee converges on the pathway(s) a system actually takes. Built so:
@@ -12,10 +17,7 @@ repeated until the committee converges on the pathway(s) a system actually takes
 3. There's a fast, dependency-free mock mode that runs the entire multi-generation loop in well under
    a second, to sanity-check the plumbing without paying for CP2K, MACE training, or OpenPathSampling.
 
-See [tutorials/formic_acid_decomposition/](tutorials/formic_acid_decomposition/) for a complete,
-real worked example (a small molecule with two competing decomposition pathways, both discovered by
-this pipeline), and [docs/CREATING_A_TUTORIAL.md](docs/CREATING_A_TUTORIAL.md) for how to set up your
-own system. To run the pipeline on a real periodic system (Cu(100)/water with CO2, as in
+See [docs/CREATING_A_NEW_SYSTEM.md](docs/CREATING_A_NEW_SYSTEM.md) for how to set up your own system. To run the pipeline on a real periodic system (Cu(100)/water with CO2, as in
 [arXiv:2605.03737](https://arxiv.org/abs/2605.03737)), follow [docs/HOWTO_RUN.md](docs/HOWTO_RUN.md);
 the inputs, final training data and trained models are in [examples/Cu_CO2/](examples/Cu_CO2/).
 
@@ -73,11 +75,8 @@ packages/
 └── cli/        # thin wrapper around workflow.engine
     └── cli/main.py            # `mtps run|status|approve`
 
-tutorials/
-└── formic_acid_decomposition/  # complete real worked example - see its own README
-
 examples/
-└── Cu_CO2/        # inputs, final train/test data and MACE committees of the Cu(100)/water CO2 system
+└── Cu_CO2/        # inputs, train/test data and MACE committees (generations 0-5) of the Cu(100)/water CO2 system
 
 scripts/
 ├── env.sh               # sets PYTHONPATH etc. so the packages run from a checkout
@@ -85,7 +84,7 @@ scripts/
 ├── make_config.py       # project directory -> workflow config JSON
 └── verify_config.py     # checks a generated config (no backend is run)
 
-docs/              # HOWTO_RUN.md (real run), CREATING_A_TUTORIAL.md, HISTORY.md
+docs/              # HOWTO_RUN.md (real run), CREATING_A_NEW_SYSTEM.md, HISTORY.md
 
 tests/
 └── test_workflow_smoke.py     # full mock end-to-end loop + manual-gate resume test
@@ -173,7 +172,7 @@ point of view.
 
 - [docs/HOWTO_RUN.md](docs/HOWTO_RUN.md) - running the full pipeline on a real system: setup, config
   generation, the DFT/approval loop, initial-data generation, expected output and troubleshooting.
-- [docs/CREATING_A_TUTORIAL.md](docs/CREATING_A_TUTORIAL.md) - how to set up a new system: choosing a
+- [docs/CREATING_A_NEW_SYSTEM.md](docs/CREATING_A_NEW_SYSTEM.md) - how to set up a new system: choosing a
   DFT backend, designing a reaction-progress CV, bootstrapping a seed trajectory, scaling up the
   generational loop, and structuring an analysis notebook.
 - [docs/HISTORY.md](docs/HISTORY.md) - development history: what was carried over from an earlier

@@ -5,7 +5,7 @@ current Python environment / PATH.
 Nothing here is a hard requirement for the whole project - the workbench is
 designed so each backend's dependencies are independent (see the main
 README's package layout). This script just reports what it finds, with
-install links for anything missing, so you know which backends/tutorials
+install links for anything missing, so you know which backends
 you can actually run without having to hit an ImportError partway through.
 
 Run: python scripts/check_environment.py
@@ -108,7 +108,7 @@ def main() -> int:
             "and the main README for the conda/mamba setup."
         )
 
-    section("notebook execution (for tutorial analysis.ipynb files):")
+    section("notebook execution (for analysis notebooks):")
     any_missing |= missing_module("nbformat")
     any_missing |= missing_module("nbclient")
     any_missing |= missing_module("matplotlib")
@@ -117,7 +117,7 @@ def main() -> int:
     if any_missing:
         print("Some optional components are missing - see warnings above. The mock backends and")
         print("core workflow always work regardless; missing items only limit which real backends")
-        print("or tutorials you can run.")
+        print("you can run.")
     else:
         print("Everything checked is available.")
     return 0

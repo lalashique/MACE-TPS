@@ -113,11 +113,6 @@ barrier region, the physically expected place for committee disagreement to peak
 `ops_backend`/`mace_backend` adapters (not just the raw legacy classes) inside `WorkflowEngine`, for 2
 full generations - the exact DFT -> MLP -> TPS -> extension -> QBC -> next-generation loop.
 
-The full formic-acid tutorial (see [tutorials/formic_acid_decomposition/](../tutorials/formic_acid_decomposition/))
-is the larger-scale, still-real follow-up to this: a system with two competing decomposition pathways,
-run for 4 generations with a 4-member committee - both pathways came out as genuinely distinct,
-smoothly-evolving trajectories (verified in that tutorial's `analysis.ipynb`, not just asserted).
-
 The OpenPathSampling stack (OpenMM, openmm-ml, openmmtools, mdtraj) isn't on PyPI for a compatible
 combo - it's conda-forge only. See the main [README](../README.md) and
 [environment.yml](../environment.yml) for how to set that up. If you hit an OpenMP double-init crash
@@ -132,7 +127,7 @@ on macOS (conda's libomp vs. torch's bundled one), set `KMP_DUPLICATE_LIB_OK=TRU
   package driving the same `step()`/`run_to_completion()`/`GateController` API the CLI uses, without
   touching orchestration logic.
 - Real CP2K/TPS running on a real multi-hundred-atom system with periodic water/electrode chemistry
-  hasn't been exercised here - only small test systems (water, a synthetic diatomic, formic acid).
+  hasn't been exercised here - only small test systems (water, a synthetic diatomic).
 
 ## Real-system workflow extensions (paper reproduction)
 
